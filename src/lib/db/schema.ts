@@ -113,13 +113,18 @@ export const ticket = pgTable(
     version: integer("version").notNull().default(1),
     createdAt: tstz("created_at").notNull().defaultNow(),
     updatedAt: tstz("updated_at").notNull().defaultNow(),
+    /**
+     * What a customer sees as "last updated" and sorts by: moved only by public messages (either side) and status
+     * changes. `updated_at` also moves for internal notes and agent-only edits, so a customer must never read it.
+     */
+    publicActivityAt: tstz("public_activity_at").notNull().defaultNow(),
   },
   (t) => [
     uniqueIndex("ticket_number_uidx").on(t.number),
     // Target of the composite foreign key from ticket_message: a message can only carry its ticket's customer.
     unique("ticket_id_customer_uq").on(t.id, t.customerId),
     index("ticket_status_due_idx").on(t.status, t.resolutionDueAt),
-    index("ticket_customer_updated_idx").on(t.customerId, t.updatedAt),
+    index("ticket_customer_updated_idx").on(t.customerId, t.publicActivityAt),
     index("ticket_assignee_idx").on(t.assigneeId),
     check("ticket_status_chk", sql`${t.status} in (${enumList(TICKET_STATUSES)})`),
     check("ticket_priority_chk", sql`${t.priority} in (${enumList(TICKET_PRIORITIES)})`),

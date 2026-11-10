@@ -3,7 +3,7 @@ import Link from "next/link";
 import { PageIntro, Panel, StatGrid, StatTile, buttonPrimary } from "@/components/ui";
 import { requireUserOrRedirect } from "@/lib/auth/session";
 import { listInbox } from "@/lib/mail/inbox";
-import { listTickets } from "@/lib/tickets";
+import { countOpenTickets } from "@/lib/tickets";
 
 export const metadata: Metadata = { title: "Dashboard" };
 export const dynamic = "force-dynamic";
@@ -18,14 +18,13 @@ const ROLE_LABEL = { user: "Customer", agent: "Agent", admin: "Admin" } as const
 export default async function DashboardPage() {
   const user = await requireUserOrRedirect();
   const inbox = await listInbox(user);
-  const tickets = user.role === "admin" ? null : (await listTickets(user, { limit: 100 })).tickets;
-  const open = tickets?.filter((t) => t.status !== "resolved").length ?? 0;
+  const open = user.role === "admin" ? null : await countOpenTickets(user);
 
   return (
     <>
       <PageIntro section={ROLE_LABEL[user.role]} title={`Welcome, ${user.name}`} description="The ticket portal and agent desk pages are coming. The API is live." actions={user.role === "admin" ? <Link href="/admin" className={buttonPrimary}>Admin</Link> : undefined} />
       <StatGrid>
-        {tickets && <StatTile value={open} label={user.role === "agent" ? "Open tickets in the queue" : "Your open tickets"} tone="accent" />}
+        {open !== null && <StatTile value={open} label={user.role === "agent" ? "Open tickets in the queue" : "Your open tickets"} tone="accent" />}
         <StatTile value={inbox.unread} label="Unread notifications" />
       </StatGrid>
       <Panel title="Notifications" count={inbox.messages.length}>

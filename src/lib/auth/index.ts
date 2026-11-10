@@ -42,12 +42,18 @@ const roleGuard = createAuthMiddleware(async (ctx) => {
   }
 });
 
-/** Audit trail for role grants: who changed whose role to what. Fires only when the change succeeded. */
+/**
+ * Audit trail for role writes: who set whose role to what, on every admin path that can set one (set-role,
+ * create-user, update-user). Fires only when the call succeeded and actually carried a role.
+ */
 const roleAudit = createAuthMiddleware(async (ctx) => {
-  if (ctx.path !== "/admin/set-role" || isAPIError(ctx.context.returned)) return;
-  const body = ctx.body as { userId?: unknown; role?: unknown } | undefined;
+  if (!ROLE_WRITE_PATHS.has(ctx.path) || isAPIError(ctx.context.returned)) return;
+  const body = ctx.body as Record<string, unknown> | undefined;
+  const role = requestedRoles(body)[0];
+  if (role === undefined) return;
+  const returned = ctx.context.returned as { user?: { id?: string } } | undefined;
   const session = await getSessionFromCtx(ctx).catch(() => null);
-  log.info("role.changed", { by: session?.user.id ?? null, userId: body?.userId, role: body?.role });
+  log.info("role.changed", { by: session?.user.id ?? null, userId: body?.userId ?? returned?.user?.id ?? null, role, via: ctx.path });
 });
 
 function createAuth() {

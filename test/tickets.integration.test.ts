@@ -225,6 +225,55 @@ describe.skipIf(!url)("tickets: access rules (Postgres)", () => {
     });
   });
 
+  describe("staff activity stays invisible to customers", () => {
+    it("an internal note and an agent-only PATCH leave the customer's timestamp and list order unchanged; public activity moves them", async () => {
+      const older = await open(bob, "older ticket");
+      const newer = await open(bob, "newer ticket");
+      const view = async (id: string) => (await get(bob, id)).body.ticket.updatedAt as string;
+      const order = async () => {
+        as(bob);
+        return (await json(await T.GET(req("/api/tickets?limit=100")))).body.tickets.map((t: { id: string }) => t.id).filter((i: string) => [older, newer].includes(i));
+      };
+      const before = { older: await view(older), newer: await view(newer), order: await order() };
+      expect(before.order).toEqual([newer, older]);
+      const staffBefore = (await row(older)).updated_at;
+
+      expect((await post(gina, older, { body: "private staff chatter", visibility: "internal" })).status).toBe(201);
+      expect((await patch(gina, older, { version: 1, priority: "high", category: "billing", assigneeId: hank.id })).status).toBe(200);
+      // The assignment of a new ticket opens it; that is a status change the customer can see, so check agent-only edits separately.
+      const v = (await row(older)).version;
+      const stable = await view(older);
+      expect((await patch(gina, older, { version: v, priority: "low", category: "bug", assigneeId: gina.id })).status).toBe(200);
+      expect(await view(older)).toBe(stable);
+      expect((await row(older)).updated_at).not.toEqual(staffBefore); // agents keep updatedAt
+      expect(await view(newer)).toBe(before.newer);
+
+      // Priority-only and note-only changes didn't reorder the customer's list.
+      expect((await post(gina, older, { body: "another private note", visibility: "internal" })).status).toBe(201);
+      expect(await view(older)).toBe(stable);
+      // Open then check the order is still [newer, older]: the first PATCH's open status was a visible change on `older`
+      // only if the status moved; compare against a fresh pair to isolate the staff-only edits.
+      const a = await open(bob, "pair a");
+      const b = await open(bob, "pair b");
+      await patch(gina, a, { version: 1, status: "open" }); // visible: moves a
+      const aAt = await view(a);
+      const pair = async () => {
+        as(bob);
+        return (await json(await T.GET(req("/api/tickets?limit=100")))).body.tickets.map((t: { id: string }) => t.id).filter((i: string) => [a, b].includes(i));
+      };
+      expect(await pair()).toEqual([a, b]);
+      await post(gina, b, { body: "internal on b", visibility: "internal" });
+      await patch(gina, b, { version: 1, priority: "urgent" });
+      expect(await pair()).toEqual([a, b]); // b did not jump ahead
+      expect(await view(a)).toBe(aAt);
+      // A public reply does move it.
+      const bAt = await view(b);
+      await post(gina, b, { body: "a visible reply" });
+      expect(await view(b)).not.toBe(bAt);
+      expect(await pair()).toEqual([b, a]);
+    });
+  });
+
   describe("the customer wall", () => {
     let adaTicket: string;
     beforeAll(async () => {
@@ -608,6 +657,17 @@ describe.skipIf(!url)("tickets: access rules (Postgres)", () => {
       await patch(gina, fine, { version: 1, priority: "high", status: "resolved" });
       const f = await row(fine);
       expect([f.breached_resolution_at, f.breached_first_response_at]).toEqual([null, null]);
+    });
+
+    it("a priority edit alone on an already-resolved ticket records no resolution breach; one that resolves does", async () => {
+      const id = await open(ada, "resolved, then edited");
+      await sql`update ticket set created_at = now() - interval '10 hours' where id = ${id}`;
+      expect((await patch(gina, id, { version: 1, status: "resolved" })).status).toBe(200); // normal: 72 h window, in time
+      expect((await row(id)).breached_resolution_at).toBeNull();
+      expect((await patch(gina, id, { version: 2, priority: "urgent" })).status).toBe(200); // 8 h window, long gone
+      expect((await row(id)).breached_resolution_at).toBeNull();
+      await get(ada, id);
+      expect((await row(id)).breached_resolution_at).toBeNull();
     });
 
     it("raising the priority while pausing records the breach, and lowering it again can't erase it", async () => {

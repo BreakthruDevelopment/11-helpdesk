@@ -36,6 +36,13 @@
       "when": 1794289477705,
       "tag": "0004_drop_example_item",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1794292787712,
+      "tag": "0005_public_activity_at",
+      "breakpoints": true
     }
   ]
 }

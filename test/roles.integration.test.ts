@@ -109,7 +109,7 @@ describe.skipIf(!url)("agent role (Better Auth + Postgres)", () => {
     expect(res.status).toBe(200);
     expect(await roleOf(id!)).toBe("agent");
     const adminId = (await sql`select id from "user" where email = ${email("admin")}`)[0].id;
-    expect(logSpy).toHaveBeenCalledWith("role.changed", { by: adminId, userId: id, role: "agent" });
+    expect(logSpy).toHaveBeenCalledWith("role.changed", { by: adminId, userId: id, role: "agent", via: "/admin/set-role" });
     // And back down again.
     expect((await call("/admin/set-role", { userId: id, role: "user" }, adminCookie)).status).toBe(200);
     expect(await roleOf(id!)).toBe("user");
@@ -136,11 +136,38 @@ describe.skipIf(!url)("agent role (Better Auth + Postgres)", () => {
     expect(await roleOf(plainId)).toBe("user");
   });
 
-  it("an admin can still create an agent directly, and update-user can set a single valid role", async () => {
+  it("create-user and update-user set a single valid role, and each is logged as role.changed", async () => {
+    const adminId = (await sql`select id from "user" where email = ${email("admin")}`)[0].id;
     const res = await call("/admin/create-user", { email: email("made"), name: "M", password: PASSWORD, role: "agent" }, adminCookie);
     expect(res.status).toBe(200);
-    expect(await roleOf(((await res.json()) as { user: { id: string } }).user.id)).toBe("agent");
-    expect((await call("/admin/update-user", { userId: plainId, data: { name: "Plain Person" } }, adminCookie)).status).toBe(200);
+    const madeId = ((await res.json()) as { user: { id: string } }).user.id;
+    expect(await roleOf(madeId)).toBe("agent");
+    expect(logSpy).toHaveBeenCalledWith("role.changed", { by: adminId, userId: madeId, role: "agent", via: "/admin/create-user" });
+
+    logSpy.mockClear();
+    const { id: target } = await signUp("updated");
+    expect((await call("/admin/update-user", { userId: target, data: { role: "agent" } }, adminCookie)).status).toBe(200);
+    expect(await roleOf(target!)).toBe("agent");
+    expect(logSpy).toHaveBeenCalledWith("role.changed", { by: adminId, userId: target, role: "agent", via: "/admin/update-user" });
+
+    // An update that sets no role is not a role change.
+    logSpy.mockClear();
+    expect((await call("/admin/update-user", { userId: target, data: { name: "Renamed" } }, adminCookie)).status).toBe(200);
+    expect(logSpy).not.toHaveBeenCalledWith("role.changed", expect.anything());
+  });
+
+  it("unknown roles are refused on update-user and create-user too, with no change and no audit entry", async () => {
+    for (const role of ["underwriter", "superuser", "admin,agent"]) {
+      let res = await call("/admin/update-user", { userId: plainId, data: { role } }, adminCookie);
+      expect(res.status).toBeGreaterThanOrEqual(400);
+      expect(res.status).toBeLessThan(500);
+      res = await call("/admin/create-user", { email: email("unknown"), name: "U", password: PASSWORD, role }, adminCookie);
+      expect(res.status).toBeGreaterThanOrEqual(400);
+      expect(res.status).toBeLessThan(500);
+    }
+    expect(await roleOf(plainId)).toBe("user");
+    expect(await sql`select 1 from "user" where email = ${email("unknown")}`).toHaveLength(0);
+    expect(logSpy).not.toHaveBeenCalledWith("role.changed", expect.anything());
   });
 
   it("agents hold no admin-plugin permission at all", async () => {

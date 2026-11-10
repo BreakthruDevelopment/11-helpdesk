@@ -125,7 +125,8 @@ const customerTicketColumns = {
   subject: ticket.subject,
   status: ticket.status,
   createdAt: ticket.createdAt,
-  updatedAt: ticket.updatedAt,
+  // The customer-facing "last updated" is the public activity time, never `updated_at` (see schema.ts).
+  updatedAt: ticket.publicActivityAt,
   resolvedAt: ticket.resolvedAt,
 };
 
@@ -238,6 +239,7 @@ export async function createTicket(actor: Actor, input: unknown): Promise<{ tick
         subject: data.subject,
         createdAt: now,
         updatedAt: now,
+        publicActivityAt: now,
         // Due times are the server's: there is no priority field for a customer to set.
         firstResponseDueAt: firstResponseDueAt("normal", now),
         resolutionDueAt: resolutionDueAt("normal", now, 0),
@@ -284,7 +286,7 @@ export async function listTickets(actor: Actor, query: unknown = {}): Promise<({
       .select(customerTicketColumns)
       .from(ticket)
       .where(and(ticketScope(access), q.status ? eq(ticket.status, q.status) : undefined))
-      .orderBy(desc(ticket.updatedAt), desc(ticket.id))
+      .orderBy(desc(ticket.publicActivityAt), desc(ticket.id))
       .limit(q.limit + 1)
       .offset(q.offset);
     const p = page(rows);
@@ -308,6 +310,16 @@ export async function listTickets(actor: Actor, query: unknown = {}): Promise<({
     .offset(q.offset);
   const p = page(rows);
   return { tickets: p.rows.map((r) => ({ ...r.ticket, customerName: r.customerName })), hasMore: p.hasMore, nextOffset: p.nextOffset };
+}
+
+/** Unresolved tickets the actor can see (a customer's own, or the whole queue for an agent), by count query. */
+export async function countOpenTickets(actor: Actor): Promise<number> {
+  const access = contentAccess(actor);
+  const [row] = await db()
+    .select({ n: count() })
+    .from(ticket)
+    .where(and(ticketScope(access), ne(ticket.status, "resolved")));
+  return row.n;
 }
 
 export async function getTicket(
@@ -412,7 +424,13 @@ export async function addMessage(actor: Actor, id: string, input: unknown): Prom
     const substantive = Object.keys(changes).length > 0;
     await tx
       .update(ticket)
-      .set({ ...changes, updatedAt: now, ...(substantive ? { version: sql`${ticket.version} + 1` } : {}) })
+      .set({
+        ...changes,
+        updatedAt: now,
+        // Customers see public messages and status changes; an internal note must not move what they see.
+        ...(inserted.visibility === "public" || changes.status !== undefined ? { publicActivityAt: now } : {}),
+        ...(substantive ? { version: sql`${ticket.version} + 1` } : {}),
+      })
       .where(eq(ticket.id, row.id));
 
     // Notifications. Internal notes notify nobody, and publicSnippet() refuses a note outright.
@@ -477,7 +495,7 @@ async function resolveAsCustomer(actor: Actor, access: ContentAccess, tid: strin
     if (row.status === "resolved") return toCustomerTicket(row, now);
     const [updated] = await tx
       .update(ticket)
-      .set({ ...resumeClock(row, now).changes, status: "resolved", resolvedAt: now, updatedAt: now, version: sql`${ticket.version} + 1` })
+      .set({ ...resumeClock(row, now).changes, status: "resolved", resolvedAt: now, updatedAt: now, publicActivityAt: now, version: sql`${ticket.version} + 1` })
       .where(eq(ticket.id, row.id))
       .returning(customerTicketColumns);
     log.info("ticket.resolved", { ticketId: tid, by: actor.id, who: "customer" });
@@ -540,11 +558,11 @@ async function updateAsAgent(actor: Actor, access: ContentAccess, tid: string, i
 
     if (Object.keys(changes).length === 0) return { ...row, customerName: null as string | null };
 
-    // A change that moves a deadline or stops a clock (a priority edit, resolving, pausing) is judged against the
+    // A change that stops a clock (this PATCH resolves or pauses) is judged against the
     // deadlines it sets, now: stampBreaches() ran on the old ones, and it skips resolved and paused tickets, so a
     // breach that only exists under the new deadlines would otherwise never be recorded (and a later edit could
     // erase the evidence). Same rules as stampBreaches(), same shape: stamp the due time, only once.
-    if (changes.priority !== undefined || changes.status === "resolved" || changes.status === "pending_customer") {
+    if (changes.status === "resolved" || changes.status === "pending_customer") {
       const end = ("resolvedAt" in changes ? changes.resolvedAt : row.resolvedAt) ?? now;
       const firstDue = changes.firstResponseDueAt ?? row.firstResponseDueAt;
       if (!row.breachedFirstResponseAt && !row.firstRespondedAt && firstDue < end) changes.breachedFirstResponseAt = firstDue;
@@ -555,7 +573,8 @@ async function updateAsAgent(actor: Actor, access: ContentAccess, tid: string, i
 
     const [saved] = await tx
       .update(ticket)
-      .set({ ...changes, updatedAt: now, version: row.version + 1 })
+      // Only a status change is visible to the customer; priority, category and assignee edits are staff-only.
+      .set({ ...changes, updatedAt: now, ...(changes.status !== undefined ? { publicActivityAt: now } : {}), version: row.version + 1 })
       .where(and(eq(ticket.id, row.id), eq(ticket.version, row.version)))
       .returning();
     if (!saved) throw new ConflictError("This ticket changed since you opened it. Reload and try again.");

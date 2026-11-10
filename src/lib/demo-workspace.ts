@@ -270,6 +270,8 @@ async function loadDemo(actor: Actor, mode: "admin" | "cli", now: Date): Promise
           pausedSeconds,
           createdAt: created,
           updatedAt: offset(Math.max(0, ...spec.messages.map((m) => m.at), spec.resolvedAt ?? 0, spec.pausedAt ?? 0)),
+          // What the customer sees: public messages and status changes only, never the internal notes.
+          publicActivityAt: offset(Math.max(0, ...spec.messages.filter((m) => !m.vis).map((m) => m.at), spec.resolvedAt ?? 0, spec.pausedAt ?? 0)),
         })
         .returning();
 

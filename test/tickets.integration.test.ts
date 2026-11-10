@@ -665,3 +665,35 @@ describe.skipIf(!url)("tickets: access rules (Postgres)", () => {
     });
   });
 });
+
+describe.skipIf(!url)("long threads (Postgres)", () => {
+  let sql: postgres.Sql;
+  const who = mk("tk-long", "user");
+  const staff = mk("tk-long-agent", "agent");
+  beforeAll(async () => {
+    Object.assign(process.env, { DATABASE_URL: url, BETTER_AUTH_SECRET: "tickets-integration-secret-32-chars-x", APP_URL: ORIGIN, LOG_LEVEL: "error", NODE_ENV: "test" });
+    (await import("@/lib/env")).resetEnvCache();
+    sql = postgres(url!, { max: 1, onnotice: () => {} });
+    await sql`delete from "user" where id in (${who.id}, ${staff.id})`;
+    for (const u of [who, staff]) await sql`insert into "user" (id, name, email, role) values (${u.id}, ${u.name}, ${u.email}, ${u.role})`;
+  });
+  afterAll(async () => {
+    await sql`delete from "user" where id in (${who.id}, ${staff.id})`;
+    await sql.end();
+  });
+
+  it("a thread over the window returns the newest messages, oldest first, for customers and agents", async () => {
+    const { createTicket, getTicket, THREAD_WINDOW } = await import("@/lib/tickets");
+    const created = await createTicket(who, { subject: "long", body: "message 0" });
+    const id = created.ticket.id;
+    await sql`insert into ticket_message (ticket_id, customer_id, author_id, author_role, visibility, body, created_at)
+              select ${id}, ${who.id}, ${who.id}, 'customer', 'public', 'message ' || g, now() + g * interval '1 second' from generate_series(1, ${THREAD_WINDOW + 9}) g`;
+    const mine = await getTicket(who, id);
+    expect(mine.messages).toHaveLength(THREAD_WINDOW);
+    expect((mine.messages.at(-1) as { body: string }).body).toBe(`message ${THREAD_WINDOW + 9}`);
+    expect((mine.messages[0] as { body: string }).body).toBe("message 10");
+    const theirs = await getTicket(staff, id);
+    expect(theirs.messages).toHaveLength(THREAD_WINDOW);
+    expect((theirs.messages.at(-1) as { body: string }).body).toBe(`message ${THREAD_WINDOW + 9}`);
+  });
+});

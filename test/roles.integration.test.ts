@@ -187,11 +187,11 @@ describe.skipIf(!url)("agent role (Better Auth + Postgres)", () => {
 
   it("pages send a signed-in user without the role to their own home", async () => {
     cookieJar.cookie = plainCookie;
-    await expect(session.requireRoleOrRedirect("agent")).rejects.toThrow("REDIRECT:/support");
+    await expect(session.requireRoleOrRedirect("agent")).rejects.toThrow("REDIRECT:/dashboard");
     cookieJar.cookie = adminCookie;
     await expect(session.requireRoleOrRedirect("agent")).rejects.toThrow("REDIRECT:/admin");
     cookieJar.cookie = agentCookie;
-    await expect(session.requireRoleOrRedirect("admin")).rejects.toThrow("REDIRECT:/desk");
+    await expect(session.requireRoleOrRedirect("admin")).rejects.toThrow("REDIRECT:/dashboard");
     await expect(session.requireRoleOrRedirect("agent")).resolves.toMatchObject({ role: "agent" });
     cookieJar.cookie = "";
     await expect(session.requireUserOrRedirect()).rejects.toThrow("REDIRECT:/sign-in");

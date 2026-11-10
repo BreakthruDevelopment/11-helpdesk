@@ -39,6 +39,9 @@ export const LIMITS = {
   reopenDays: 7,
 } as const;
 
+/** A thread response carries the newest this many visible messages (oldest first). */
+export const THREAD_WINDOW = 500;
+
 const DAY_SECONDS = 86_400;
 const REOPEN_MS = LIMITS.reopenDays * DAY_SECONDS * 1000;
 
@@ -302,9 +305,10 @@ export async function getTicket(
       .select({ id: ticketMessage.id, authorId: ticketMessage.authorId, authorRole: ticketMessage.authorRole, body: ticketMessage.body, createdAt: ticketMessage.createdAt })
       .from(ticketMessage)
       .where(and(eq(ticketMessage.ticketId, tid), messageScope(access)))
-      .orderBy(asc(ticketMessage.createdAt))
-      .limit(500);
-    return { ticket: toCustomerTicket(row, new Date()), messages: messages.map((m) => toCustomerMessage(m, actor)) };
+      .orderBy(desc(ticketMessage.createdAt), desc(ticketMessage.id))
+      .limit(THREAD_WINDOW);
+    // The newest messages, oldest first: a long thread keeps showing new replies instead of freezing on the first 500.
+    return { ticket: toCustomerTicket(row, new Date()), messages: messages.reverse().map((m) => toCustomerMessage(m, actor)) };
   }
 
   const [found] = await db()
@@ -318,9 +322,9 @@ export async function getTicket(
     .from(ticketMessage)
     .leftJoin(author, eq(author.id, ticketMessage.authorId))
     .where(and(eq(ticketMessage.ticketId, tid), messageScope(access)))
-    .orderBy(asc(ticketMessage.createdAt))
-    .limit(500);
-  return { ticket: { ...found.ticket, customerName: found.customerName }, messages: messages.map((m) => ({ ...m.message, authorName: m.authorName })) };
+    .orderBy(desc(ticketMessage.createdAt), desc(ticketMessage.id))
+    .limit(THREAD_WINDOW);
+  return { ticket: { ...found.ticket, customerName: found.customerName }, messages: messages.reverse().map((m) => ({ ...m.message, authorName: m.authorName })) };
 }
 
 // ---------------------------------------------------------------------------

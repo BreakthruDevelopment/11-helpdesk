@@ -13,7 +13,7 @@ import { log } from "@/lib/log";
 import { publicSnippet, subjectFor } from "@/lib/mail";
 import { firstResponseDueAt, resolutionDueAt } from "@/lib/sla";
 import { stampBreaches } from "@/lib/sla-db";
-import { reserveDaily } from "@/lib/usage";
+import { releaseDaily, releaseRate, reserveDaily } from "@/lib/usage";
 
 /**
  * The demo workspace: 3 customers, 2 agents, 1 admin and 12 tickets across every state, one with a breached first
@@ -138,23 +138,34 @@ const LOCK_KEY = "demo-load";
 const tryLock = (tx: Pick<ReturnType<typeof db>, "execute">) =>
   tx.execute<{ ok: boolean }>(sql`select pg_try_advisory_xact_lock(hashtextextended(${LOCK_KEY}, 0)) as ok`);
 
-type Tx = Parameters<Parameters<ReturnType<typeof db>["transaction"]>[0]>[0];
-
 /**
- * Atomic global reservation: one load per minute and `DEMO_LOADS_PER_DAY` per UTC day for the whole app. The caller
- * already holds the load lock in this transaction, so the winner of the lock is also the one that reserves. A refusal
- * leaves no trace, and a failed load rolls the reservation back with it.
+ * Atomic global reservation: one load per minute and `DEMO_LOADS_PER_DAY` per UTC day for the whole app. Runs in its
+ * own short transaction under the load lock, so two requests can't both reserve; a refusal leaves no trace.
+ * (Nothing else may use the pool while a transaction holds its connection, so no transaction in this file ever
+ * spans the load: it works with a one-connection pool, `DB_POOL_MAX=1`.)
  */
-async function reserveLocked(tx: Tx, actor: Actor): Promise<void> {
-  const { rateEvent } = schema;
-  const any = eq(rateEvent.kind, "demo_load");
-  await tx.delete(rateEvent).where(and(any, sql`${rateEvent.at} <= now() - interval '1 minute'`));
-  const [{ n }] = await tx.select({ n: count() }).from(rateEvent).where(and(any, gt(rateEvent.at, sql`now() - interval '1 minute'`)));
-  if (n) throw new TooManyRequestsError("Demo workspace can be loaded once per minute. Try again shortly.");
-  if (!(await reserveDaily(tx, "demo_load", DEMO_LOADS_PER_DAY))) {
-    throw new TooManyRequestsError("The demo workspace was loaded the maximum number of times today. Try again tomorrow.");
-  }
-  await tx.insert(rateEvent).values({ userId: actor.id, kind: "demo_load" });
+async function reserve(actor: Actor): Promise<void> {
+  await db().transaction(async (tx) => {
+    const [{ ok }] = await tryLock(tx);
+    if (!ok) throw new TooManyRequestsError("A demo load is already running. Try again shortly.");
+    const { rateEvent } = schema;
+    const any = eq(rateEvent.kind, "demo_load");
+    await tx.delete(rateEvent).where(and(any, sql`${rateEvent.at} <= now() - interval '1 minute'`));
+    const [{ n }] = await tx.select({ n: count() }).from(rateEvent).where(and(any, gt(rateEvent.at, sql`now() - interval '1 minute'`)));
+    if (n) throw new TooManyRequestsError("Demo workspace can be loaded once per minute. Try again shortly.");
+    if (!(await reserveDaily(tx, "demo_load", DEMO_LOADS_PER_DAY))) {
+      throw new TooManyRequestsError("The demo workspace was loaded the maximum number of times today. Try again tomorrow.");
+    }
+    await tx.insert(rateEvent).values({ userId: actor.id, kind: "demo_load" });
+  });
+}
+
+/** A load that failed after reserving gives its reservation back. */
+async function release(actor: Actor): Promise<void> {
+  await db().transaction(async (tx) => {
+    await releaseRate(tx, actor.id, "demo_load");
+    await releaseDaily(tx, "demo_load");
+  });
 }
 
 export type DemoLoadResult = { users: number; tickets: number; messages: number; notifications: number };
@@ -167,26 +178,25 @@ export async function loadDemoWorkspace(
   actor: Actor,
   options: unknown = { mode: "admin" },
   now: Date = new Date(),
-  { reserve = false }: { reserve?: boolean } = {},
+  { reserve: reserveSlot = false }: { reserve?: boolean } = {},
 ): Promise<DemoLoadResult> {
   assertAdmin(actor);
   const parsed = optionsSchema.parse(options);
-  // One dedicated transaction holds the lock for the whole load, so the CLI and the route can't interleave.
-  // Never wait for it: a second load would sit on a pool connection doing nothing.
-  return db().transaction(async (tx) => {
-    const [{ ok }] = await tryLock(tx);
-    if (!ok) throw new TooManyRequestsError("A demo load is already running. Try again shortly.");
-    if (reserve) {
-      await reserveLocked(tx, actor);
-      log.info("admin.demo_load", { by: actor.id });
-    }
-    const result = await loadLocked(actor, parsed.mode, now);
+  if (reserveSlot) {
+    await reserve(actor);
+    log.info("admin.demo_load", { by: actor.id });
+  }
+  try {
+    const result = await loadDemo(actor, parsed.mode, now);
     log.info("demo.loaded", { by: actor.id, mode: parsed.mode, ...result });
     return result;
-  });
+  } catch (err) {
+    if (reserveSlot) await release(actor).catch(() => undefined);
+    throw err;
+  }
 }
 
-async function loadLocked(actor: Actor, mode: "admin" | "cli", now: Date): Promise<DemoLoadResult> {
+async function loadDemo(actor: Actor, mode: "admin" | "cli", now: Date): Promise<DemoLoadResult> {
   const password = mode === "cli" ? demoSeedConfig().password : undefined;
   const api = auth();
   const ctx = await api.$context;
@@ -228,6 +238,8 @@ async function loadLocked(actor: Actor, mode: "admin" | "cli", now: Date): Promi
   let notifications = 0;
 
   await db().transaction(async (tx) => {
+    // Serialize loads (the CLI and the route can overlap): wait for the lock, never nest another pool use inside.
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${LOCK_KEY}, 0))`);
     // Replace only the demo users' data. Ids come from the marker-checked accounts above, never from a name or a
     // SQL predicate. Deleting a customer's tickets cascades to their messages and every notification about them.
     await tx.delete(ticket).where(inArray(ticket.customerId, ids));

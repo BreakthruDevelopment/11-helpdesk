@@ -189,6 +189,42 @@ describe.skipIf(!url)("tickets: access rules (Postgres)", () => {
   });
 
   // -------------------------------------------------------------------------------------------------------------
+  describe("paging", () => {
+    it("pages past the 100 row limit for customers and agents, without gaps or repeats", async () => {
+      const filler = mk("tk-pager", "user");
+      await sql`insert into "user" (id, name, email, role) values (${filler.id}, ${filler.name}, ${filler.email}, 'user')`;
+      await sql`insert into ticket (customer_id, subject, first_response_due_at, resolution_due_at, updated_at)
+                select ${filler.id}, 'paged ' || g, now() + g * interval '1 minute', now() + g * interval '1 minute', now() - g * interval '1 second' from generate_series(1, 120) g`;
+      const collect = async (who: Who, path: string) => {
+        as(who);
+        const ids: string[] = [];
+        let offset = 0;
+        for (let guard = 0; guard < 5; guard++) {
+          const r = await json(await T.GET(req(`${path}${path.includes("?") ? "&" : "?"}limit=100&offset=${offset}`)));
+          expect(r.status).toBe(200);
+          ids.push(...r.body.tickets.map((t: { id: string }) => t.id));
+          if (!r.body.hasMore) {
+            expect(r.body.nextOffset).toBeNull();
+            break;
+          }
+          expect(r.body.nextOffset).toBe(offset + 100);
+          offset = r.body.nextOffset;
+        }
+        return ids;
+      };
+      const mine = await collect(filler, "/api/tickets");
+      expect(mine).toHaveLength(120);
+      expect(new Set(mine).size).toBe(120);
+      const queue = await collect(gina, "/api/tickets?view=unassigned&status=new");
+      expect(new Set(queue).size).toBe(queue.length);
+      expect(queue.length).toBeGreaterThanOrEqual(120);
+      for (const id of mine) expect(queue).toContain(id);
+      as(filler);
+      expect((await json(await T.GET(req("/api/tickets?offset=-1")))).status).toBe(400);
+      await sql`delete from "user" where id = ${filler.id}`;
+    });
+  });
+
   describe("the customer wall", () => {
     let adaTicket: string;
     beforeAll(async () => {

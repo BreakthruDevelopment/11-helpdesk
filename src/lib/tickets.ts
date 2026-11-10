@@ -84,7 +84,11 @@ export const listQuery = z.object({
   view: z.enum(["unassigned", "mine", "all"]).default("all"),
   status: z.enum(schema.TICKET_STATUSES).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
+  /** Rows to skip, for paging past `limit`: the response's `nextOffset` when `hasMore` is true. */
+  offset: z.coerce.number().int().min(0).max(100_000).default(0),
 });
+
+export type Page = { hasMore: boolean; nextOffset: number | null };
 
 // ---------------------------------------------------------------------------
 // Response shapes
@@ -255,21 +259,30 @@ export async function createTicket(actor: Actor, input: unknown): Promise<{ tick
 // Read
 // ---------------------------------------------------------------------------
 
-/** Customers: their own tickets, newest activity first. Agents: the queue (see `view`), soonest resolution due first. */
-export async function listTickets(actor: Actor, query: unknown = {}): Promise<{ tickets: CustomerTicket[] } | { tickets: AgentTicket[] }> {
+/**
+ * Customers: their own tickets, newest activity first. Agents: the queue (see `view`), soonest resolution due first.
+ * Both page with `limit` and `offset`: `hasMore` says whether another page exists and `nextOffset` where it starts.
+ */
+export async function listTickets(actor: Actor, query: unknown = {}): Promise<({ tickets: CustomerTicket[] } | { tickets: AgentTicket[] }) & Page> {
   const access = contentAccess(actor);
   const q = listQuery.parse(query);
   await stampBreaches(db());
   const now = new Date();
+  const page = <T,>(rows: T[]): { rows: T[] } & Page => {
+    const hasMore = rows.length > q.limit;
+    return { rows: rows.slice(0, q.limit), hasMore, nextOffset: hasMore ? q.offset + q.limit : null };
+  };
 
   if (access.kind === "customer") {
     const rows = await db()
       .select(customerTicketColumns)
       .from(ticket)
       .where(and(ticketScope(access), q.status ? eq(ticket.status, q.status) : undefined))
-      .orderBy(desc(ticket.updatedAt))
-      .limit(q.limit);
-    return { tickets: rows.map((r) => toCustomerTicket(r, now)) };
+      .orderBy(desc(ticket.updatedAt), desc(ticket.id))
+      .limit(q.limit + 1)
+      .offset(q.offset);
+    const p = page(rows);
+    return { tickets: p.rows.map((r) => toCustomerTicket(r, now)), hasMore: p.hasMore, nextOffset: p.nextOffset };
   }
 
   const view: SQL | undefined =
@@ -283,10 +296,12 @@ export async function listTickets(actor: Actor, query: unknown = {}): Promise<{ 
     .from(ticket)
     .leftJoin(user, eq(user.id, ticket.customerId))
     .where(and(ticketScope(access), view, q.status ? eq(ticket.status, q.status) : undefined))
-    // Open work first, the soonest resolution deadline at the top. Issue 11.2 refines the queue.
-    .orderBy(asc(sql`(${ticket.status} = 'resolved')`), asc(ticket.resolutionDueAt))
-    .limit(q.limit);
-  return { tickets: rows.map((r) => ({ ...r.ticket, customerName: r.customerName })) };
+    // Open work first, the soonest resolution deadline at the top; the id keeps pages stable. Issue 11.2 refines the queue.
+    .orderBy(asc(sql`(${ticket.status} = 'resolved')`), asc(ticket.resolutionDueAt), asc(ticket.id))
+    .limit(q.limit + 1)
+    .offset(q.offset);
+  const p = page(rows);
+  return { tickets: p.rows.map((r) => ({ ...r.ticket, customerName: r.customerName })), hasMore: p.hasMore, nextOffset: p.nextOffset };
 }
 
 export async function getTicket(

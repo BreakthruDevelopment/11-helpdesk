@@ -66,7 +66,8 @@ describe.skipIf(!url)("demo workspace (Postgres, Better Auth)", () => {
   }
 
   beforeAll(async () => {
-    Object.assign(process.env, base, { NODE_ENV: "test", DATABASE_URL: url, BETTER_AUTH_SECRET: "demo-integration-secret-32-characters", AI_PROVIDER: "demo", LOG_LEVEL: "error" });
+    // One pooled connection for the whole file: a load that nested pool use inside a transaction would hang here.
+    Object.assign(process.env, base, { DB_POOL_MAX: "1", NODE_ENV: "test", DATABASE_URL: url, BETTER_AUTH_SECRET: "demo-integration-secret-32-characters", AI_PROVIDER: "demo", LOG_LEVEL: "error" });
     (await import("@/lib/env")).resetEnvCache();
     sql = postgres(url!, { max: 1, onnotice: () => {} });
     await clean();
@@ -179,6 +180,18 @@ describe.skipIf(!url)("demo workspace (Postgres, Better Auth)", () => {
     const before = (await sql`select count(*)::int as n from ticket`)[0].n;
     await expect(loader.loadDemoWorkspace(actor, { mode: "cli" })).rejects.toMatchObject({ status: 409 });
     expect((await sql`select count(*)::int as n from ticket`)[0].n).toBe(before);
+  });
+
+  it("a failed admin load gives its reservation back, so an immediate retry isn't rate limited", async () => {
+    await clean();
+    await sql`insert into "user" (id, name, email, role) values ('ds-admin', 'Admin', 'ds-admin@test.local', 'admin')`;
+    await loader.loadDemoWorkspace(actor, { mode: "cli" });
+    await sql`update "user" set image = null where email = ${email("devon")}`;
+    const [{ n: dailyBefore }] = (await sql`select coalesce(sum(count), 0)::int as n from daily_usage where kind = 'demo_load'`) as unknown as [{ n: number }];
+    expect((await post(req())).status).toBe(409);
+    expect((await sql`select count(*)::int as n from rate_event where kind = 'demo_load'`)[0].n).toBe(0);
+    expect((await sql`select coalesce(sum(count), 0)::int as n from daily_usage where kind = 'demo_load'`)[0].n).toBe(dailyBefore);
+    expect((await post(req())).status).toBe(409); // still the conflict, not a 429
   });
 
   it("only an admin actor can load, and unknown modes are refused", async () => {

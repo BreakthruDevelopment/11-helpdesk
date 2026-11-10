@@ -531,6 +531,15 @@ async function updateAsAgent(actor: Actor, access: ContentAccess, tid: string, i
 
     if (Object.keys(changes).length === 0) return { ...row, customerName: null as string | null };
 
+    // Resolving ends both clocks for good, and stampBreaches() skips resolved tickets, so a breach that only exists
+    // under the deadlines this same change sets (a priority raise plus a resolve) must be recorded now.
+    if (changes.status === "resolved") {
+      const resolutionDue = changes.resolutionDueAt ?? row.resolutionDueAt;
+      if (!row.breachedResolutionAt && resolutionDue < now) changes.breachedResolutionAt = resolutionDue;
+      const firstDue = changes.firstResponseDueAt ?? row.firstResponseDueAt;
+      if (!row.breachedFirstResponseAt && !row.firstRespondedAt && firstDue < now) changes.breachedFirstResponseAt = firstDue;
+    }
+
     const [saved] = await tx
       .update(ticket)
       .set({ ...changes, updatedAt: now, version: row.version + 1 })

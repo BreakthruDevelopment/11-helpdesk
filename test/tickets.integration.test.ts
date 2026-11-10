@@ -591,6 +591,25 @@ describe.skipIf(!url)("tickets: access rules (Postgres)", () => {
       expect(await counted(tooLate)).toBe(1);
     });
 
+    it("raising the priority and resolving in one change records the breach the new deadlines imply", async () => {
+      const id = await open(ada, "old ticket");
+      // Ten hours old: inside the normal windows for resolution (72 h), past the urgent ones (1 h first response, 8 h resolution).
+      await sql`update ticket set created_at = now() - interval '10 hours' where id = ${id}`;
+      const r = await patch(gina, id, { version: 1, priority: "urgent", status: "resolved" });
+      expect(r.status).toBe(200);
+      const t = await row(id);
+      expect(t.status).toBe("resolved");
+      expect(t.breached_resolution_at).not.toBeNull();
+      expect(t.breached_first_response_at).not.toBeNull();
+      // A later look changes nothing (idempotent), and a change that stays inside the deadline records nothing.
+      await get(ada, id);
+      expect((await row(id)).breached_resolution_at).toEqual(t.breached_resolution_at);
+      const fine = await open(ada, "fresh ticket");
+      await patch(gina, fine, { version: 1, priority: "high", status: "resolved" });
+      const f = await row(fine);
+      expect([f.breached_resolution_at, f.breached_first_response_at]).toEqual([null, null]);
+    });
+
     it("a paused ticket is not breaching its resolution clock; a running one past due is", async () => {
       const paused = await open(ada, "paused");
       const running = await open(ada, "running");

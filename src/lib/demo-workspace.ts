@@ -1,5 +1,6 @@
 import "server-only";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
+import { hashPassword } from "better-auth/crypto";
 import { and, count, eq, gt, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 import { assertAdmin } from "@/lib/access";
@@ -196,10 +197,13 @@ export async function loadDemoWorkspace(
   }
 }
 
+/** Postgres unique violation, possibly wrapped by Drizzle (`cause`). */
+const isUniqueViolation = (e: unknown): boolean =>
+  typeof e === "object" && e !== null && ((e as { code?: unknown }).code === "23505" || isUniqueViolation((e as { cause?: unknown }).cause));
+
 async function loadDemo(actor: Actor, mode: "admin" | "cli", now: Date): Promise<DemoLoadResult> {
   const password = mode === "cli" ? demoSeedConfig().password : undefined;
-  const api = auth();
-  const ctx = await api.$context;
+  const ctx = await auth().$context;
   // The admin button creates no admin account: a demo admin with a password nobody knows is still an admin account.
   const who = (Object.keys(PEOPLE) as Person[]).filter((p) => mode === "cli" || PEOPLE[p].role !== "admin");
   const people = new Map<Person, string>();
@@ -224,8 +228,19 @@ async function loadDemo(actor: Actor, mode: "admin" | "cli", now: Date): Promise
       await ctx.internalAdapter.deleteUserSessions(existing.id);
       people.set(p, existing.id);
     } else {
-      const created = await api.api.createUser({ body: { email, name, password: secret, role, data: { image: MARKER } } });
-      people.set(p, created.user.id);
+      // Written with Drizzle, not Better Auth: the auth hooks refuse demo emails and marker images.
+      const newId = randomUUID();
+      try {
+        await db().transaction(async (tx) => {
+          await tx.insert(schema.user).values({ id: newId, email, name, role, image: MARKER });
+          await tx.insert(schema.account).values({ id: randomUUID(), accountId: newId, providerId: "credential", userId: newId, password: await hashPassword(secret) });
+        });
+      } catch (e) {
+        // A real account took the demo email since the preflight: report a conflict, not a crash.
+        if (isUniqueViolation(e)) throw new ConflictError("A demo email belongs to an unrelated account; no demo data was replaced.");
+        throw e;
+      }
+      people.set(p, newId);
     }
   }
   const ids = [...people.values()];

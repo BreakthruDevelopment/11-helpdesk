@@ -4,22 +4,11 @@ import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { nextCookies } from "better-auth/next-js";
 import { APIError, createAuthMiddleware, getSessionFromCtx, isAPIError } from "better-auth/api";
 import { admin } from "better-auth/plugins";
-import { isDemoEmail, MARKER } from "@/lib/demo-identity";
+import { refuseDemoIdentity } from "@/lib/demo-identity";
 import { db, schema } from "@/lib/db";
 import { env } from "@/lib/env";
 import { log } from "@/lib/log";
 import { ac, DISABLED_AUTH_PATHS, roles } from "./permissions";
-
-/**
- * Demo identities are created only by the server-side loader (no HTTP request in the endpoint context). Any
- * request-driven create or update, such as public sign-up or update-user, cannot use a demo address or the marker.
- */
-function rejectDemoIdentity(data: Record<string, unknown>, ctx: { request?: Request } | null | undefined) {
-  if (!ctx?.request) return;
-  if (isDemoEmail(data.email) || data.image === MARKER) {
-    throw new APIError("BAD_REQUEST", { message: "That email or image is reserved." });
-  }
-}
 
 /** The admin-plugin paths that write a role. */
 const ROLE_WRITE_PATHS = new Set(["/admin/set-role", "/admin/create-user", "/admin/update-user"]);
@@ -92,8 +81,10 @@ function createAuth() {
     hooks: { before: roleGuard, after: roleAudit },
     databaseHooks: {
       user: {
-        create: { before: async (user, ctx) => void rejectDemoIdentity(user, ctx) },
-        update: { before: async (data, ctx) => void rejectDemoIdentity(data, ctx) },
+        // Nobody can sign up as, or turn an account into, a demo identity (see demo-identity.ts). The demo loader
+        // writes its users directly with Drizzle and never goes through these hooks.
+        create: { before: async (data) => refuseDemoIdentity(data) },
+        update: { before: async (data) => refuseDemoIdentity(data) },
       },
     },
     plugins: [

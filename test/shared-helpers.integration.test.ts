@@ -33,13 +33,13 @@ describe.skipIf(!url)("shared helpers (Postgres)", () => {
   it("ownedBy: the owner sees the row; another user and an admin match nothing", async () => {
     const { and, eq } = await import("drizzle-orm");
     const { ownedBy } = await import("@/lib/owned");
-    const [row] = await database.insert(schema.item).values({ ownerId: alice.id, title: "mine" }).returning();
-    const find = (actor: { id: string }) => database.select().from(schema.item).where(ownedBy(schema.item, actor, eq(schema.item.id, row.id)));
+    const [row] = await database.insert(schema.job).values({ kind: "sh-test", ownerId: alice.id }).returning();
+    const find = (actor: { id: string }) => database.select().from(schema.job).where(ownedBy(schema.job, actor, eq(schema.job.id, row.id)));
     expect(await find(alice)).toHaveLength(1);
     expect(await find(bob)).toHaveLength(0);
     expect(await find(admin)).toHaveLength(0);
     // Extra conditions are ANDed in, never OR-ed.
-    expect(await database.select().from(schema.item).where(ownedBy(schema.item, alice, and(eq(schema.item.title, "other"))))).toHaveLength(0);
+    expect(await database.select().from(schema.job).where(ownedBy(schema.job, alice, and(eq(schema.job.kind, "other"))))).toHaveLength(0);
   });
 
   it("ownedBy: tables keyed by userId work too", async () => {

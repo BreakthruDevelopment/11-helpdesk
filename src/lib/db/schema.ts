@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { boolean, check, date, index, integer, jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { boolean, check, date, foreignKey, index, integer, jsonb, pgTable, primaryKey, serial, text, timestamp, unique, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 
 // ---------------------------------------------------------------------------
 // Auth tables (shape required by Better Auth with the admin plugin).
@@ -69,22 +69,123 @@ export const verification = pgTable("verification", {
 });
 
 // ---------------------------------------------------------------------------
-// Example domain table. Each app replaces this with its own entities, keeping
-// the ownerId pattern so per-user access control stays enforceable in SQL.
+// Helpdesk domain. A ticket belongs to one customer (`customer_id`); agents see every ticket; admins see counts
+// only. Which rows each role may read is decided in src/lib/access.ts, never in a route.
 // ---------------------------------------------------------------------------
 
-export const item = pgTable(
-  "item",
+export const TICKET_STATUSES = ["new", "open", "pending_customer", "resolved"] as const;
+export const TICKET_PRIORITIES = ["urgent", "high", "normal", "low"] as const;
+export const TICKET_CATEGORIES = ["billing", "technical", "account", "how_to", "bug", "feature_request", "other"] as const;
+export const TRIAGE_SOURCES = ["ai", "agent", "none"] as const;
+export const MESSAGE_VISIBILITIES = ["public", "internal"] as const;
+export const MESSAGE_AUTHOR_ROLES = ["customer", "agent"] as const;
+export const MAIL_KINDS = ["ticket_created", "agent_reply", "ticket_resolved", "ticket_assigned", "customer_reply"] as const;
+
+const enumList = (values: readonly string[]) => sql.raw(values.map((v) => `'${v}'`).join(", "));
+const tstz = (name: string) => timestamp(name, { withTimezone: true });
+
+export const ticket = pgTable(
+  "ticket",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    ownerId: text("owner_id")
+    number: serial("number").notNull(),
+    customerId: text("customer_id")
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
-    title: text("title").notNull(),
-    body: text("body").notNull().default(""),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    subject: text("subject").notNull(),
+    status: text("status", { enum: TICKET_STATUSES }).notNull().default("new"),
+    priority: text("priority", { enum: TICKET_PRIORITIES }).notNull().default("normal"),
+    category: text("category", { enum: TICKET_CATEGORIES }).notNull().default("other"),
+    assigneeId: text("assignee_id").references(() => user.id, { onDelete: "set null" }),
+    /** Written by the AI triage task (issue 11.3); never shown to customers. */
+    triage: jsonb("triage").$type<Record<string, unknown>>(),
+    triageSource: text("triage_source", { enum: TRIAGE_SOURCES }).notNull().default("none"),
+    firstResponseDueAt: tstz("first_response_due_at").notNull(),
+    resolutionDueAt: tstz("resolution_due_at").notNull(),
+    firstRespondedAt: tstz("first_responded_at"),
+    resolvedAt: tstz("resolved_at"),
+    /** Set while the status is `pending_customer`: the resolution clock is stopped. */
+    pausedAt: tstz("paused_at"),
+    pausedSeconds: integer("paused_seconds").notNull().default(0),
+    breachedFirstResponseAt: tstz("breached_first_response_at"),
+    breachedResolutionAt: tstz("breached_resolution_at"),
+    /** Optimistic locking: agents send the version they read; a stale one is a 409. */
+    version: integer("version").notNull().default(1),
+    createdAt: tstz("created_at").notNull().defaultNow(),
+    updatedAt: tstz("updated_at").notNull().defaultNow(),
+    /**
+     * What a customer sees as "last updated" and sorts by: moved only by public messages (either side) and status
+     * changes. `updated_at` also moves for internal notes and agent-only edits, so a customer must never read it.
+     */
+    publicActivityAt: tstz("public_activity_at").notNull().defaultNow(),
   },
-  (t) => [index("item_owner_id_idx").on(t.ownerId)],
+  (t) => [
+    uniqueIndex("ticket_number_uidx").on(t.number),
+    // Target of the composite foreign key from ticket_message: a message can only carry its ticket's customer.
+    unique("ticket_id_customer_uq").on(t.id, t.customerId),
+    index("ticket_status_due_idx").on(t.status, t.resolutionDueAt),
+    index("ticket_customer_updated_idx").on(t.customerId, t.publicActivityAt),
+    index("ticket_assignee_idx").on(t.assigneeId),
+    check("ticket_status_chk", sql`${t.status} in (${enumList(TICKET_STATUSES)})`),
+    check("ticket_priority_chk", sql`${t.priority} in (${enumList(TICKET_PRIORITIES)})`),
+    check("ticket_category_chk", sql`${t.category} in (${enumList(TICKET_CATEGORIES)})`),
+    check("ticket_triage_source_chk", sql`${t.triageSource} in (${enumList(TRIAGE_SOURCES)})`),
+    check("ticket_subject_chk", sql`char_length(${t.subject}) between 1 and 150`),
+    check("ticket_paused_chk", sql`${t.pausedSeconds} >= 0 and (${t.pausedAt} is null or ${t.status} = 'pending_customer')`),
+  ],
+);
+
+export const ticketMessage = pgTable(
+  "ticket_message",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    ticketId: uuid("ticket_id").notNull(),
+    /** Same value as the ticket's customer; the composite key below makes any other value impossible. */
+    customerId: text("customer_id").notNull(),
+    /** Null once the author's account is deleted; the message stays with its ticket. */
+    authorId: text("author_id").references(() => user.id, { onDelete: "set null" }),
+    authorRole: text("author_role", { enum: MESSAGE_AUTHOR_ROLES }).notNull(),
+    visibility: text("visibility", { enum: MESSAGE_VISIBILITIES }).notNull().default("public"),
+    body: text("body").notNull(),
+    /** True when the agent started from an AI draft (issue 11.3). Never shown to customers. */
+    aiAssisted: boolean("ai_assisted").notNull().default(false),
+    createdAt: tstz("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({ columns: [t.ticketId, t.customerId], foreignColumns: [ticket.id, ticket.customerId], name: "ticket_message_ticket_customer_fk" }).onDelete("cascade"),
+    index("ticket_message_thread_idx").on(t.ticketId, t.createdAt),
+    check("ticket_message_visibility_chk", sql`${t.visibility} in (${enumList(MESSAGE_VISIBILITIES)})`),
+    check("ticket_message_author_role_chk", sql`${t.authorRole} in (${enumList(MESSAGE_AUTHOR_ROLES)})`),
+    // Customers can only ever write public messages; the database refuses an internal one with a customer role.
+    check("ticket_message_internal_agent_chk", sql`${t.visibility} = 'public' or ${t.authorRole} = 'agent'`),
+    check("ticket_message_body_chk", sql`char_length(${t.body}) between 1 and 5000`),
+  ],
+);
+
+/** The simulated email outbox (src/lib/mail). One row per notification; the recipient reads it at /inbox. */
+export const mailMessage = pgTable(
+  "mail_message",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    recipientId: text("recipient_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    ticketId: uuid("ticket_id")
+      .notNull()
+      .references(() => ticket.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: MAIL_KINDS }).notNull(),
+    subject: text("subject").notNull(),
+    snippet: text("snippet").notNull().default(""),
+    readAt: tstz("read_at"),
+    createdAt: tstz("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("mail_message_recipient_idx").on(t.recipientId, t.createdAt),
+    index("mail_message_ticket_idx").on(t.ticketId),
+    check("mail_message_kind_chk", sql`${t.kind} in (${enumList(MAIL_KINDS)})`),
+    check("mail_message_subject_chk", sql`char_length(${t.subject}) <= 150`),
+    check("mail_message_snippet_chk", sql`char_length(${t.snippet}) <= 200`),
+  ],
 );
 
 // ---------------------------------------------------------------------------
@@ -92,7 +193,9 @@ export const item = pgTable(
 // needs a migration, because the CHECK constraints below are part of the schema.
 // ---------------------------------------------------------------------------
 
-export const RATE_KINDS = ["api_write", "ai", "upload"] as const;
+// `api_write` and `upload` stay from the template (its tests use them). `ticket` is per hour and `ticket_day` per day:
+// consumeRate prunes rows older than the window it is called with, so one kind can't carry two windows.
+export const RATE_KINDS = ["api_write", "ai", "upload", "ticket", "ticket_day", "message", "kb_write", "retriage", "suggest", "demo_load"] as const;
 export const DAILY_USAGE_KINDS = ["ai", "demo_load"] as const;
 
 const list = (values: readonly string[]) => sql.raw(values.map((v) => `'${v}'`).join(", "));
@@ -172,5 +275,7 @@ export const job = pgTable(
 );
 
 export type User = typeof user.$inferSelect;
-export type Item = typeof item.$inferSelect;
+export type Ticket = typeof ticket.$inferSelect;
+export type TicketMessage = typeof ticketMessage.$inferSelect;
+export type MailMessage = typeof mailMessage.$inferSelect;
 export type Job = typeof job.$inferSelect;

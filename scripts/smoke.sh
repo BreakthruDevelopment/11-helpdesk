@@ -1,16 +1,24 @@
 #!/usr/bin/env bash
 # End-to-end smoke test against a running app (local, CI, or a deployed URL).
-# Signs up two users over HTTP and proves one can't delete the other's item.
-#   BASE_URL=https://app7.breakthruventures.ai ./scripts/smoke.sh
+# Customer side (always): two customers sign up; A opens a ticket; B gets 404 on it and 403 on triage; writes are
+# refused without our Origin. Agent side (only when SMOKE_AGENT_EMAIL and SMOKE_AGENT_PASSWORD are set; CI seeds an
+# agent with `pnpm db:seed`, the live smoke covers the customer side only): internal note plus public reply, A sees
+# the reply and not the note, the inbox message has no note text, first response stamped, pending_customer pauses
+# the clock and A's reply resumes it, due times are set. KB search and the AI triage checks arrive with 11.2 and 11.3.
+#   BASE_URL=https://app11.breakthruventures.ai ./scripts/smoke.sh
 set -euo pipefail
 
 BASE_URL="${BASE_URL:-http://localhost:3000}"
 RUN_ID="$(date +%s)$RANDOM"
-JAR_A="$(mktemp)"; JAR_B="$(mktemp)"
-trap 'rm -f "$JAR_A" "$JAR_B"' EXIT
+JAR_A="$(mktemp)"; JAR_B="$(mktemp)"; JAR_G="$(mktemp)"
+trap 'rm -f "$JAR_A" "$JAR_B" "$JAR_G"' EXIT
+NOTE="internal-note-canary-$RUN_ID"
 
 fail() { echo "SMOKE FAIL: $*" >&2; exit 1; }
 pass() { echo "ok - $*"; }
+# jget '<expression on j>' reads JSON on stdin, e.g. jget 'j.ticket.id'
+jget() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);const v=eval(process.argv[1]);process.stdout.write(v===undefined||v===null?"":String(v))})' "$1"; }
+status() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 
 health=$(curl -fsS "$BASE_URL/api/health") || fail "health endpoint unreachable"
 echo "$health" | grep -q '"status":"ok"' || fail "health not ok: $health"
@@ -23,7 +31,7 @@ done
 pass "pages render inside the shared shell"
 
 for path in /dashboard /admin; do
-  code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL$path")
+  code=$(status "$BASE_URL$path")
   [ "$code" = "307" ] || fail "signed-out $path should redirect (307), got $code"
 done
 pass "signed-out dashboard and admin redirect"
@@ -37,42 +45,104 @@ signup() {
 
 signup "$JAR_A" "smoke-a-$RUN_ID@example.test"
 signup "$JAR_B" "smoke-b-$RUN_ID@example.test"
-pass "two users signed up"
+pass "two customers signed up"
 
-code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/api/items")
+# Sign-up can't choose a role: a customer is refused the agent endpoints.
+code=$(status -b "$JAR_A" "$BASE_URL/api/admin/stats")
+[ "$code" = "403" ] || fail "a customer reading admin stats should be 403, got $code"
+pass "customers have no admin access"
+
+code=$(status "$BASE_URL/api/tickets")
 [ "$code" = "401" ] || fail "anonymous list should be 401, got $code"
 pass "anonymous access refused"
 
-code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_A" -H 'content-type: application/json' -H 'origin: https://evil.example' \
-  -d '{"title":"x"}' "$BASE_URL/api/items")
+new_ticket='{"subject":"smoke: cannot log in","body":"The page says invalid password."}'
+code=$(status -b "$JAR_A" -H 'content-type: application/json' -H 'origin: https://evil.example' -d "$new_ticket" "$BASE_URL/api/tickets")
 [ "$code" = "403" ] || fail "cross-origin create should be 403, got $code"
-code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_A" -H 'content-type: application/json' \
-  -d '{"title":"x"}' "$BASE_URL/api/items")
+code=$(status -b "$JAR_A" -H 'content-type: application/json' -d "$new_ticket" "$BASE_URL/api/tickets")
 [ "$code" = "403" ] || fail "create without an Origin should be 403, got $code"
-code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_A" -H 'content-type: application/json' -H "origin: $BASE_URL" \
-  -d '{nope' "$BASE_URL/api/items")
+code=$(status -b "$JAR_A" -H 'content-type: application/json' -H "origin: $BASE_URL" -d '{nope' "$BASE_URL/api/tickets")
 [ "$code" = "400" ] || fail "malformed JSON should be 400, got $code"
 code=$(head -c 40000 /dev/zero | tr '\0' 'x' | curl -s -o /dev/null -w '%{http_code}' -b "$JAR_A" -H 'content-type: application/json' -H "origin: $BASE_URL" \
-  --data-binary @- "$BASE_URL/api/items")
+  --data-binary @- "$BASE_URL/api/tickets")
 [ "$code" = "413" ] || fail "oversized body should be 413, got $code"
-pass "cross-origin, malformed and oversized writes refused"
+code=$(status -b "$JAR_A" -H 'content-type: application/json' -H "origin: $BASE_URL" -d '{"subject":"x","body":"y","priority":"urgent"}' "$BASE_URL/api/tickets")
+[ "$code" = "400" ] || fail "a customer-chosen priority should be 400, got $code"
+pass "cross-origin, malformed, oversized and queue-jumping writes refused"
 
-item=$(curl -fsS -b "$JAR_A" -H 'content-type: application/json' -H "origin: $BASE_URL" \
-  -d '{"title":"smoke item"}' "$BASE_URL/api/items") || fail "create item failed"
-id=$(echo "$item" | sed -E 's/.*"id":"([^"]+)".*/\1/')
-[ -n "$id" ] || fail "no item id in $item"
-pass "user A created an item"
+created=$(curl -fsS -b "$JAR_A" -H 'content-type: application/json' -H "origin: $BASE_URL" -d "$new_ticket" "$BASE_URL/api/tickets") || fail "create ticket failed"
+TID=$(echo "$created" | jget 'j.ticket.id')
+[ -n "$TID" ] || fail "no ticket id in $created"
+[ "$(echo "$created" | jget 'j.ticket.status')" = "new" ] || fail "new ticket should be status new: $created"
+echo "$created" | grep -Eq 'assignee|triage|dueAt|version' && fail "a customer's ticket response must not carry staff fields: $created"
+pass "customer A opened a ticket"
 
-code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -b "$JAR_B" -H "origin: $BASE_URL" "$BASE_URL/api/items/$id")
-[ "$code" = "403" ] || fail "user B deleting A's item should be 403, got $code"
-pass "user B blocked from A's item"
+code=$(status -b "$JAR_B" "$BASE_URL/api/tickets/$TID")
+[ "$code" = "404" ] || fail "customer B reading A's ticket should be 404, got $code"
+code=$(status -X POST -b "$JAR_B" -H 'content-type: application/json' -H "origin: $BASE_URL" -d '{"body":"hi"}' "$BASE_URL/api/tickets/$TID/messages")
+[ "$code" = "404" ] || fail "customer B replying on A's ticket should be 404, got $code"
+code=$(status -X PATCH -b "$JAR_B" -H 'content-type: application/json' -H "origin: $BASE_URL" -d '{"action":"resolve"}' "$BASE_URL/api/tickets/$TID")
+[ "$code" = "404" ] || fail "customer B resolving A's ticket should be 404, got $code"
+code=$(status -X POST -b "$JAR_B" -H 'content-type: application/json' -H "origin: $BASE_URL" -d '{}' "$BASE_URL/api/tickets/$TID/triage")
+[ "$code" = "403" ] || fail "customer B on the triage route should be 403, got $code"
+code=$(status -X POST -b "$JAR_A" -H 'content-type: application/json' -H "origin: $BASE_URL" -d '{}' "$BASE_URL/api/tickets/$TID/triage")
+[ "$code" = "403" ] || fail "even the owner on the triage route should be 403, got $code"
+b_list=$(curl -fsS -b "$JAR_B" "$BASE_URL/api/tickets")
+echo "$b_list" | grep -q "$TID" && fail "B's ticket list contains A's ticket"
+pass "customer B blocked from A's ticket (404) and from triage (403)"
 
-code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -b "$JAR_A" -H "origin: $BASE_URL" "$BASE_URL/api/ai/summarize")
-[ "$code" = "200" ] || fail "AI summary should be 200, got $code"
-pass "AI summary responds"
+code=$(status -X POST -b "$JAR_A" -H 'content-type: application/json' -H "origin: $BASE_URL" -d "{\"body\":\"$NOTE\",\"visibility\":\"internal\"}" "$BASE_URL/api/tickets/$TID/messages")
+[ "$code" = "403" ] || fail "a customer writing an internal note should be 403, got $code"
+pass "customers can't write internal notes"
 
-code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -b "$JAR_A" -H "origin: $BASE_URL" "$BASE_URL/api/items/$id")
-[ "$code" = "204" ] || fail "owner delete should be 204, got $code"
-pass "owner deleted their item"
+if [ -n "${SMOKE_AGENT_EMAIL:-}" ] && [ -n "${SMOKE_AGENT_PASSWORD:-}" ]; then
+  curl -fsS -c "$JAR_G" -b "$JAR_G" -H 'content-type: application/json' -H "origin: $BASE_URL" \
+    -d "{\"email\":\"$SMOKE_AGENT_EMAIL\",\"password\":\"$SMOKE_AGENT_PASSWORD\"}" \
+    "$BASE_URL/api/auth/sign-in/email" >/dev/null || fail "agent sign-in failed"
+
+  agent_view=$(curl -fsS -b "$JAR_G" "$BASE_URL/api/tickets/$TID") || fail "agent could not read the ticket"
+  [ -n "$(echo "$agent_view" | jget 'j.ticket.firstResponseDueAt')" ] || fail "first response due time not set: $agent_view"
+  [ -n "$(echo "$agent_view" | jget 'j.ticket.resolutionDueAt')" ] || fail "resolution due time not set: $agent_view"
+  pass "agent sees the ticket with SLA due times set"
+
+  code=$(status -X POST -b "$JAR_G" -H 'content-type: application/json' -H "origin: $BASE_URL" -d "{\"body\":\"$NOTE\",\"visibility\":\"internal\"}" "$BASE_URL/api/tickets/$TID/messages")
+  [ "$code" = "201" ] || fail "agent internal note should be 201, got $code"
+  code=$(status -X POST -b "$JAR_G" -H 'content-type: application/json' -H "origin: $BASE_URL" -d '{"body":"Thanks, we are looking into your login problem."}' "$BASE_URL/api/tickets/$TID/messages")
+  [ "$code" = "201" ] || fail "agent public reply should be 201, got $code"
+  pass "agent added an internal note and a public reply"
+
+  a_view=$(curl -fsS -b "$JAR_A" "$BASE_URL/api/tickets/$TID")
+  echo "$a_view" | grep -q 'looking into your login problem' || fail "customer A should see the public reply"
+  echo "$a_view" | grep -q "$NOTE" && fail "customer A can see the internal note"
+  a_inbox=$(curl -fsS -b "$JAR_A" "$BASE_URL/api/inbox")
+  echo "$a_inbox" | grep -q 'looking into your login problem' || fail "customer A's inbox should hold the reply notification"
+  echo "$a_inbox" | grep -q "$NOTE" && fail "customer A's inbox contains the internal note"
+  a_list=$(curl -fsS -b "$JAR_A" "$BASE_URL/api/tickets")
+  echo "$a_list" | grep -q "$NOTE" && fail "customer A's list contains the internal note"
+  pass "customer A sees the reply, never the note; the inbox message has no note text"
+
+  agent_view=$(curl -fsS -b "$JAR_G" "$BASE_URL/api/tickets/$TID")
+  [ -n "$(echo "$agent_view" | jget 'j.ticket.firstRespondedAt')" ] || fail "first response was not stamped: $agent_view"
+  [ "$(echo "$agent_view" | jget 'j.ticket.status')" = "open" ] || fail "a replied-to new ticket should be open: $agent_view"
+  pass "first response stamped"
+
+  version=$(echo "$agent_view" | jget 'j.ticket.version')
+  paused=$(curl -fsS -X PATCH -b "$JAR_G" -H 'content-type: application/json' -H "origin: $BASE_URL" -d "{\"version\":$version,\"status\":\"pending_customer\"}" "$BASE_URL/api/tickets/$TID") || fail "agent could not set pending_customer"
+  [ -n "$(echo "$paused" | jget 'j.ticket.pausedAt')" ] || fail "pending_customer should pause the clock: $paused"
+  code=$(status -X PATCH -b "$JAR_G" -H 'content-type: application/json' -H "origin: $BASE_URL" -d "{\"version\":$version,\"priority\":\"high\"}" "$BASE_URL/api/tickets/$TID")
+  [ "$code" = "409" ] || fail "a stale version should be 409, got $code"
+  code=$(status -X POST -b "$JAR_A" -H 'content-type: application/json' -H "origin: $BASE_URL" -d '{"body":"Here are the details you asked for."}' "$BASE_URL/api/tickets/$TID/messages")
+  [ "$code" = "201" ] || fail "customer reply should be 201, got $code"
+  resumed=$(curl -fsS -b "$JAR_G" "$BASE_URL/api/tickets/$TID")
+  [ -z "$(echo "$resumed" | jget 'j.ticket.pausedAt')" ] || fail "the customer's reply should resume the clock: $resumed"
+  [ "$(echo "$resumed" | jget 'j.ticket.status')" = "open" ] || fail "the customer's reply should reopen the work: $resumed"
+  pass "pending_customer paused the clock, a stale version was refused, the customer's reply resumed it"
+else
+  echo "skip - agent checks (set SMOKE_AGENT_EMAIL and SMOKE_AGENT_PASSWORD)"
+fi
+
+code=$(status -X PATCH -b "$JAR_A" -H 'content-type: application/json' -H "origin: $BASE_URL" -d '{"action":"resolve"}' "$BASE_URL/api/tickets/$TID")
+[ "$code" = "200" ] || fail "owner resolve should be 200, got $code"
+pass "customer A marked their ticket resolved"
 
 echo "SMOKE PASS"

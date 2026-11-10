@@ -27,11 +27,20 @@ export async function requireUserOrRedirect(): Promise<CurrentUser> {
   return user;
 }
 
-/** For pages: signed-in users without the role go to the dashboard. */
+/** For pages: signed-in users without exactly this role go to their own home. Admin is not a superset of agent. */
 export async function requireRoleOrRedirect(role: Role): Promise<CurrentUser> {
   const user = await requireUserOrRedirect();
-  if (role === "admin" && user.role !== "admin") redirect("/dashboard");
+  if (user.role !== role) redirect(homeFor(user.role));
   return user;
+}
+
+/**
+ * Where each role lands after sign-in and when it asks for a page that isn't its own. Every role goes to /dashboard
+ * until the customer portal (/support) and the agent desk (/desk) exist (issues 11.4 and 11.5); /dashboard will then
+ * redirect there. Admins keep /admin.
+ */
+export function homeFor(role: Role): string {
+  return role === "admin" ? "/admin" : "/dashboard";
 }
 
 /** For route handlers and server actions: throw, so the caller maps it to 401/403. */
@@ -41,8 +50,9 @@ export async function requireUser(): Promise<CurrentUser> {
   return user;
 }
 
+/** Exactly this role (403 otherwise). Admin does not pass `requireRole("agent")`, or the other way round. */
 export async function requireRole(role: Role): Promise<CurrentUser> {
   const user = await requireUser();
-  if (role === "admin" && user.role !== "admin") throw new ForbiddenError();
+  if (user.role !== role) throw new ForbiddenError();
   return user;
 }

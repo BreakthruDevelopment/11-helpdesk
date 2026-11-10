@@ -1,15 +1,14 @@
 import { requireUser } from "@/lib/auth/session";
 import { errorResponse } from "@/lib/http";
-import { summarizeItems } from "@/lib/items";
+import { listInbox } from "@/lib/mail/inbox";
 
 export const dynamic = "force-dynamic";
 
-/** POST /api/ai/summarize — AI summary of the caller's items. */
-export async function POST() {
+/** GET /api/inbox: the caller's own notifications and unread count. */
+export async function GET() {
   try {
     const user = await requireUser();
-    const result = await summarizeItems(user);
-    return Response.json(result);
+    return Response.json(await listInbox(user));
   } catch (err) {
     return errorResponse(err);
   }

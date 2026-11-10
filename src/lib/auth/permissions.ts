@@ -9,6 +9,9 @@
  * Deliberately NOT granted to admins: user `impersonate`, `impersonate-admins`,
  * `set-password`, `set-email`, and session `list` (it returns other users' raw session
  * tokens, IP addresses and user agents). Do not add them back.
+ *
+ * `agent` (support staff) gets no Better Auth permissions at all: their powers are app-level, checked in the data
+ * functions (src/lib/access.ts). Admin is NOT a superset of agent: admins see counts, never ticket contents.
  */
 import { createAccessControl } from "better-auth/plugins/access";
 import { defaultStatements } from "better-auth/plugins/admin/access";
@@ -20,6 +23,7 @@ export const roles = {
     user: ["create", "list", "set-role", "ban", "delete", "get", "update"],
     session: ["revoke", "delete"],
   }),
+  agent: ac.newRole({ user: [], session: [] }),
   user: ac.newRole({ user: [], session: [] }),
 };
 

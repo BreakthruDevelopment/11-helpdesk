@@ -4,7 +4,8 @@
  * handler calls these before touching data.
  */
 
-export const ROLES = ["user", "admin"] as const;
+/** `user` is a customer. `agent` is support staff. Exactly one role per account. */
+export const ROLES = ["user", "agent", "admin"] as const;
 export type Role = (typeof ROLES)[number];
 
 export type Actor = { id: string; role: Role };
@@ -18,13 +19,21 @@ export function isRole(value: unknown): value is Role {
   return typeof value === "string" && (ROLES as readonly string[]).includes(value);
 }
 
-/** Better Auth's admin plugin can store comma-separated roles; take the strongest. */
+/**
+ * Better Auth's admin plugin can store comma-separated roles; return exactly one, the strongest
+ * (admin, then agent, then user), so an account never holds two. Unknown names are `user`.
+ */
 export function toRole(value: string | null | undefined): Role {
   if (!value) return "user";
   const parts = value.split(",").map((p) => p.trim());
-  return parts.includes("admin") ? "admin" : "user";
+  if (parts.includes("admin")) return "admin";
+  return parts.includes("agent") ? "agent" : "user";
 }
 
+/**
+ * The template's ownership rule: admins pass everything. The helpdesk does NOT use it for tickets, messages or
+ * mail (admins must see counts only); those go through src/lib/access.ts.
+ */
 export function can(actor: Actor, action: Action, resource?: Owned): boolean {
   if (actor.role === "admin") return true;
   if (action === "create") return true;

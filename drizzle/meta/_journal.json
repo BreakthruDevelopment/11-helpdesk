@@ -22,6 +22,20 @@
       "when": 1794281493312,
       "tag": "0002_background-jobs",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1794289476910,
+      "tag": "0003_tickets_core",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1794289477705,
+      "tag": "0004_drop_example_item",
+      "breakpoints": true
     }
   ]
 }

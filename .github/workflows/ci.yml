@@ -57,8 +57,16 @@ jobs:
           cp -r .next/static .next/standalone/.next/
           PORT=3000 HOSTNAME=127.0.0.1 nohup node .next/standalone/server.js > app.log 2>&1 &
           for i in $(seq 1 30); do curl -fsS localhost:3000/api/health && break; sleep 1; done
+      - name: Seed a smoke agent
+        run: pnpm db:seed
+        env:
+          SEED_AGENT_EMAIL: smoke-agent@example.test
+          SEED_AGENT_PASSWORD: smoke-agent-password-1
       - name: End-to-end smoke test
         run: bash scripts/smoke.sh
+        env:
+          SMOKE_AGENT_EMAIL: smoke-agent@example.test
+          SMOKE_AGENT_PASSWORD: smoke-agent-password-1
       - name: App log on failure
         if: failure()
         run: tail -100 app.log || true

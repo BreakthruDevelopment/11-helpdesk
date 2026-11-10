@@ -6,10 +6,26 @@ image that deploys to AWS, Azure, Google Cloud or Oracle Cloud.
 
 ## What this app does
 
-_Each app replaces this section: the customer problem, who uses it, and what the AI feature does._
+A helpdesk ("a Zendesk we own"): customers open tickets in a portal, agents work a queue with SLA clocks, and admins
+see counts only. Spec: [`specs/11-helpdesk.md`](https://github.com/BreakthruDevelopment/ai-dev-os/blob/main/specs/11-helpdesk.md).
+This README is filled in fully by issue 11.8; what exists after issue 11.1 (roles, tickets, messages and notes, the
+outbox) is:
 
-The template ships an example "items" feature: users manage their own items, admins see everyone's, and
-an AI summary describes the list.
+| Role | Can do |
+| --- | --- |
+| `user` (customer) | Open tickets; read their own tickets and the public replies; reply; mark resolved; read their in-app inbox. Anything else about a ticket (assignee, triage, SLA clocks, priority) is not in their responses |
+| `agent` | Every ticket; public replies and internal notes; status, priority, category and assignee (with the ticket's `version`; a stale one is a 409) |
+| `admin` | Counts (`GET /api/admin/stats`), role management including granting `agent`, the demo button. Ticket content routes answer 404 |
+
+Rules that hold on every route: customers get 404 (never 403) for tickets that aren't theirs; **internal notes are
+filtered in SQL for customers and can never reach a notification** (`publicSnippet()` refuses a note, and tests scan
+every response and `mail_message`); mutating routes require our own Origin and valid JSON of at most 32 KB.
+
+Email is simulated: events write a `mail_message` row in the same transaction (`src/lib/mail/`, the `Mailer` seam),
+and the recipient reads it at `/inbox` (`GET /api/inbox`, `POST /api/inbox/read`). Where each rule lives:
+`src/lib/access.ts` (who may see what), `src/lib/tickets.ts` (data functions), `src/lib/sla.ts` and `src/lib/sla-db.ts`
+(due times, pause rule, lazy breach stamping). The demo workspace (3 customers, 2 agents, 1 admin, 12 tickets) loads
+from `/api/admin/demo` or locally with `scripts/seed-demo.mts` (see its header).
 
 ## Architecture
 
@@ -34,7 +50,12 @@ Next.js container ── pages, server actions, route handlers (/api/*)
 
 ## Auth and roles
 
-Two roles, `user` and `admin`, via Better Auth's admin plugin. **Admins manage accounts but never act as users:**
+Three roles, `user` (a customer), `agent` (support staff) and `admin`, via Better Auth's admin plugin. `agent` has no
+admin-plugin permissions (its powers are app-level, in `src/lib/access.ts`) and **admin is not a superset of agent**:
+`requireRole()` and `requireRoleOrRedirect()` match exactly one role, and `toRole()` returns one (`admin`, then `agent`,
+then `user`). Sign-up can't choose a role; only an admin grants `agent`, logged as `role.changed`; unknown role names
+and role lists are refused (`src/lib/auth/index.ts` hooks, `test/roles.integration.test.ts`).
+**Admins manage accounts but never act as users:**
 `src/lib/auth/permissions.ts` gives `admin` create, list, get, update, set-role, ban and delete on users plus
 session revoke/delete. It withholds `impersonate`, `impersonate-admins`, `set-password` and `set-email`
 (Better Auth's default admin role includes them) and session `list`, which would expose other users' raw

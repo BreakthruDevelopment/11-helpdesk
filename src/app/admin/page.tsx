@@ -28,7 +28,7 @@ export default async function AdminPage() {
     {
       key: "role",
       header: "Role",
-      cell: (u) => (u.role === "admin" ? <span className="inline-flex rounded-md bg-accent-soft px-2 py-0.5 text-sm font-medium text-accent">Admin</span> : "User"),
+      cell: (u) => (u.role === "admin" ? <span className="inline-flex rounded-md bg-accent-soft px-2 py-0.5 text-sm font-medium text-accent">Admin</span> : u.role === "agent" ? "Agent" : "Customer"),
     },
     {
       key: "joined",
@@ -40,9 +40,10 @@ export default async function AdminPage() {
 
   return (
     <>
-      <PageIntro section="Admin" title="Users" description="Everyone who has signed up, newest first." />
+      <PageIntro section="Admin" title="Users" description="Everyone who has signed up, newest first. Counts and roles only: admins never see ticket contents." />
       <StatGrid>
         <StatTile value={users.length} label="Users" tone="accent" />
+        <StatTile value={users.filter((u) => u.role === "agent").length} label="Agents" />
         <StatTile value={users.filter((u) => u.role === "admin").length} label="Admins" />
       </StatGrid>
       <Panel title="All users" count={users.length}>

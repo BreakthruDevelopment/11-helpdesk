@@ -6,7 +6,7 @@ import { z } from "zod";
  */
 const schema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
-  APP_NAME: z.string().default("30 Apps Template"),
+  APP_NAME: z.string().default("Helpdesk"),
   // The public URL, e.g. https://app7.breakthruventures.ai. Sign-in callbacks,
   // cookies and CORS all derive from it, so a domain change never touches code.
   APP_URL: z.string().url().default("http://localhost:3000"),
@@ -26,6 +26,10 @@ const schema = z.object({
   AI_EMBED_MODEL: z.string().optional(),
   // Provider call timeout. 20 s keeps AI calls inside Lambda's 29 s limit (route maxDuration is 25 s).
   AI_TIMEOUT_MS: z.coerce.number().int().positive().max(22000).default(20000),
+  // App-wide cap on model calls per UTC day (triage plus suggested replies), shown against usage on /admin.
+  AI_DAILY_CAP: z.coerce.number().int().positive().max(100_000).default(400),
+  // How notifications leave the app. Only the in-app outbox exists; src/lib/mail is the seam for smtp or resend.
+  MAIL_PROVIDER: z.enum(["outbox"]).default("outbox"),
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
 });
 

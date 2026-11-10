@@ -540,13 +540,17 @@ async function updateAsAgent(actor: Actor, access: ContentAccess, tid: string, i
 
     if (Object.keys(changes).length === 0) return { ...row, customerName: null as string | null };
 
-    // Resolving ends both clocks for good, and stampBreaches() skips resolved tickets, so a breach that only exists
-    // under the deadlines this same change sets (a priority raise plus a resolve) must be recorded now.
-    if (changes.status === "resolved") {
-      const resolutionDue = changes.resolutionDueAt ?? row.resolutionDueAt;
-      if (!row.breachedResolutionAt && resolutionDue < now) changes.breachedResolutionAt = resolutionDue;
+    // A change that moves a deadline or stops a clock (a priority edit, resolving, pausing) is judged against the
+    // deadlines it sets, now: stampBreaches() ran on the old ones, and it skips resolved and paused tickets, so a
+    // breach that only exists under the new deadlines would otherwise never be recorded (and a later edit could
+    // erase the evidence). Same rules as stampBreaches(), same shape: stamp the due time, only once.
+    if (changes.priority !== undefined || changes.status === "resolved" || changes.status === "pending_customer") {
+      const end = ("resolvedAt" in changes ? changes.resolvedAt : row.resolvedAt) ?? now;
       const firstDue = changes.firstResponseDueAt ?? row.firstResponseDueAt;
-      if (!row.breachedFirstResponseAt && !row.firstRespondedAt && firstDue < now) changes.breachedFirstResponseAt = firstDue;
+      if (!row.breachedFirstResponseAt && !row.firstRespondedAt && firstDue < end) changes.breachedFirstResponseAt = firstDue;
+      const resolutionDue = changes.resolutionDueAt ?? row.resolutionDueAt;
+      const stayingPaused = row.pausedAt !== null && changes.status === undefined;
+      if (!row.breachedResolutionAt && !stayingPaused && resolutionDue < end) changes.breachedResolutionAt = resolutionDue;
     }
 
     const [saved] = await tx

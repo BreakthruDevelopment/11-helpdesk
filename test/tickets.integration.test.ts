@@ -610,6 +610,24 @@ describe.skipIf(!url)("tickets: access rules (Postgres)", () => {
       expect([f.breached_resolution_at, f.breached_first_response_at]).toEqual([null, null]);
     });
 
+    it("raising the priority while pausing records the breach, and lowering it again can't erase it", async () => {
+      const id = await open(ada, "old, then paused");
+      await sql`update ticket set created_at = now() - interval '10 hours' where id = ${id}`;
+      expect((await patch(gina, id, { version: 1, priority: "urgent", status: "pending_customer" })).status).toBe(200);
+      let t = await row(id);
+      expect(t.paused_at).not.toBeNull();
+      expect(t.breached_resolution_at).not.toBeNull();
+      const stamped = t.breached_resolution_at;
+      expect((await patch(gina, id, { version: 2, priority: "low" })).status).toBe(200);
+      t = await row(id);
+      expect(t.breached_resolution_at).toEqual(stamped);
+      // A paused ticket that stays paused is not judged: a priority edit alone stamps nothing new on its resolution clock.
+      const calm = await open(ada, "paused in time");
+      await patch(gina, calm, { version: 1, status: "pending_customer" });
+      await patch(gina, calm, { version: 2, priority: "high" });
+      expect((await row(calm)).breached_resolution_at).toBeNull();
+    });
+
     it("a paused ticket is not breaching its resolution clock; a running one past due is", async () => {
       const paused = await open(ada, "paused");
       const running = await open(ada, "running");

@@ -492,7 +492,8 @@ async function resolveAsCustomer(actor: Actor, access: ContentAccess, tid: strin
     await stampBreaches(tx);
     const row = await lockTicket(tx, access, tid);
     const now = await dbNow(tx);
-    if (row.status === "resolved") return toCustomerTicket(row, now);
+    // `row` is the full locked row: map the customer-facing time explicitly, never its staff `updatedAt`.
+    if (row.status === "resolved") return toCustomerTicket({ ...row, updatedAt: row.publicActivityAt }, now);
     const [updated] = await tx
       .update(ticket)
       .set({ ...resumeClock(row, now).changes, status: "resolved", resolvedAt: now, updatedAt: now, publicActivityAt: now, version: sql`${ticket.version} + 1` })

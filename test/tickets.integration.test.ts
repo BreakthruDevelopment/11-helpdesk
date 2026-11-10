@@ -266,6 +266,13 @@ describe.skipIf(!url)("tickets: access rules (Postgres)", () => {
       await patch(gina, b, { version: 1, priority: "urgent" });
       expect(await pair()).toEqual([a, b]); // b did not jump ahead
       expect(await view(a)).toBe(aAt);
+      // An idempotent resolve answers with the public time too, never the staff one.
+      const c = await open(bob, "resolved then noted");
+      await patch(bob, c, { action: "resolve" });
+      const cAt = await view(c);
+      await post(gina, c, { body: "staff note after resolve", visibility: "internal" });
+      const again = await patch(bob, c, { action: "resolve" });
+      expect(new Date(again.body.ticket.updatedAt).getTime()).toBe(new Date(cAt).getTime());
       // A public reply does move it.
       const bAt = await view(b);
       await post(gina, b, { body: "a visible reply" });

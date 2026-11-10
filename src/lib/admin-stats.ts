@@ -4,7 +4,7 @@ import { assertAdmin } from "@/lib/access";
 import type { Actor } from "@/lib/auth/rbac";
 import { db, schema } from "@/lib/db";
 import { env } from "@/lib/env";
-import { stampBreaches } from "@/lib/sla-db";
+import { FIRST_RESPONSE_OVERDUE, stampBreaches } from "@/lib/sla-db";
 import { dailyCount } from "@/lib/usage";
 
 export type AdminStats = {
@@ -32,8 +32,7 @@ export async function adminStats(actor: Actor): Promise<AdminStats> {
   // The stamped columns plus the unstamped predicate, so the count is right even if the stamping hasn't run.
   const [breaches] = await db().execute<{ first: number; resolution: number }>(sql`
     select
-      count(*) filter (where breached_first_response_at is not null
-        or (first_responded_at is null and first_response_due_at < now()))::int as first,
+      count(*) filter (where breached_first_response_at is not null or (${FIRST_RESPONSE_OVERDUE}))::int as first,
       count(*) filter (where breached_resolution_at is not null
         or (resolved_at is null and paused_at is null and resolution_due_at < now()))::int as resolution
     from ticket

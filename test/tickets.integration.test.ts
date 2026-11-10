@@ -568,6 +568,29 @@ describe.skipIf(!url)("tickets: access rules (Postgres)", () => {
       expect(t.first_responded_at).not.toBeNull();
     });
 
+    it("resolving ends the first-response obligation: closed before the deadline is no breach, closed after it is", async () => {
+      const inTime = await open(ada, "resolved in time");
+      const tooLate = await open(ada, "resolved too late");
+      await patch(ada, inTime, { action: "resolve" });
+      await sql`update ticket set first_response_due_at = now() + interval '1 minute' where id = ${inTime}`;
+      await sql`update ticket set first_response_due_at = now() - interval '1 hour' where id = ${tooLate}`;
+      await sql`update ticket set first_response_due_at = now() - interval '1 second' where id = ${inTime}`;
+      // `inTime` was resolved before its (new) deadline passed: set resolved_at back to just before it.
+      await sql`update ticket set resolved_at = first_response_due_at - interval '1 minute' where id = ${inTime}`;
+      await get(ada, inTime);
+      expect((await row(inTime)).breached_first_response_at).toBeNull();
+      await patch(ada, tooLate, { action: "resolve" }); // stamps the breach first, then resolves
+      const t = await row(tooLate);
+      expect(t.breached_first_response_at).not.toBeNull();
+      expect(t.resolved_at).not.toBeNull();
+      // The admin count uses the same rule: only the late one is a breach, stamped or not.
+      const counted = async (id: string) =>
+        (await sql`select 1 from ticket where id = ${id} and (breached_first_response_at is not null
+          or (first_responded_at is null and first_response_due_at < now() and (resolved_at is null or resolved_at > first_response_due_at)))`).length;
+      expect(await counted(inTime)).toBe(0);
+      expect(await counted(tooLate)).toBe(1);
+    });
+
     it("a paused ticket is not breaching its resolution clock; a running one past due is", async () => {
       const paused = await open(ada, "paused");
       const running = await open(ada, "running");
@@ -596,7 +619,8 @@ describe.skipIf(!url)("tickets: access rules (Postgres)", () => {
       const id = await open(ada);
       as(gina);
       const results = await Promise.all(
-        ["high", "low", "urgent", "normal"].map((priority) => TID.PATCH(req(`/api/tickets/${id}`, "PATCH", { version: 1, priority }), ctx(id))),
+        // None equals the current priority (normal): an unchanged value would be a no-op 200, not a competing write.
+        ["high", "low", "urgent", "high"].map((priority) => TID.PATCH(req(`/api/tickets/${id}`, "PATCH", { version: 1, priority }), ctx(id))),
       );
       const statuses = results.map((r) => r.status).sort();
       expect(statuses).toEqual([200, 409, 409, 409]);

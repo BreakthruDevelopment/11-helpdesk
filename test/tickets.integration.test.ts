@@ -685,6 +685,32 @@ describe.skipIf(!url)("tickets: access rules (Postgres)", () => {
       expect([t.status, t.resolved_at]).toEqual(["open", null]);
     });
 
+    it("reopening counts toward the 50 open ticket cap: a reply that would make 51 is a 409 and the ticket stays resolved", async () => {
+      const capped = mk("tk-capped", "user");
+      await sql`insert into "user" (id, name, email, role) values (${capped.id}, ${capped.name}, ${capped.email}, 'user')`;
+      await sql`insert into ticket (customer_id, subject, status, first_response_due_at, resolution_due_at)
+                select ${capped.id}, 'open ' || g, 'open', now(), now() from generate_series(1, 50) g`;
+      const [resolved] = await sql`insert into ticket (customer_id, subject, status, resolved_at, first_response_due_at, resolution_due_at)
+                values (${capped.id}, 'recently resolved', 'resolved', now() - interval '1 day', now(), now()) returning id`;
+      const blocked = await post(capped, resolved.id, { body: "it is broken again" });
+      expect(blocked.status).toBe(409);
+      expect((await row(resolved.id)).status).toBe("resolved");
+      expect(await sql`select 1 from ticket_message where ticket_id = ${resolved.id}`).toHaveLength(0);
+      // Room again once one open ticket is resolved.
+      await sql`update ticket set status = 'resolved', resolved_at = now() where id = (select id from ticket where customer_id = ${capped.id} and status = 'open' limit 1)`;
+      expect((await post(capped, resolved.id, { body: "it is broken again" })).status).toBe(201);
+      expect((await row(resolved.id)).status).toBe("open");
+      // Concurrent reopens can't both take the last slot.
+      await sql`delete from ticket where customer_id = ${capped.id}`;
+      await sql`insert into ticket (customer_id, subject, status, first_response_due_at, resolution_due_at)
+                select ${capped.id}, 'open ' || g, 'open', now(), now() from generate_series(1, 49) g`;
+      const twoIds = await sql`insert into ticket (customer_id, subject, status, resolved_at, first_response_due_at, resolution_due_at)
+                select ${capped.id}, 'resolved ' || g, 'resolved', now() - interval '1 day', now(), now() from generate_series(1, 2) g returning id`;
+      const results = await Promise.all(twoIds.map((t) => post(capped, t.id, { body: "again" })));
+      expect(results.map((r) => r.status).sort()).toEqual([201, 409]);
+      await sql`delete from "user" where id = ${capped.id}`;
+    });
+
     it("after 7 days a customer reply is a 409 ('open a follow-up') and the list says so", async () => {
       const id = await open(ada);
       await patch(ada, id, { action: "resolve" });

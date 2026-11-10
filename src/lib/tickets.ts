@@ -12,7 +12,7 @@ import { mailer } from "@/lib/mail/outbox";
 import { publicSnippet, subjectFor } from "@/lib/mail";
 import { firstResponseDueAt, pausedFor, resolutionDueAt } from "@/lib/sla";
 import { stampBreaches } from "@/lib/sla-db";
-import { type Tx, consumeRate } from "@/lib/usage";
+import { type Tx, advisoryLock, consumeRate } from "@/lib/usage";
 
 /**
  * Ticket and message data functions. Each one takes the acting user and starts with `contentAccess(actor)`
@@ -184,6 +184,15 @@ async function lockTicket(tx: Tx, access: ContentAccess, id: string) {
   return row;
 }
 
+/** At most 50 unresolved tickets per customer. Call under `advisoryLock(tx, "rate:ticket:<customerId>")`. */
+async function assertUnderOpenCap(tx: Tx, customerId: string): Promise<void> {
+  const [{ open }] = await tx
+    .select({ open: count() })
+    .from(ticket)
+    .where(and(eq(ticket.customerId, customerId), ne(ticket.status, "resolved")));
+  if (open >= LIMITS.openPerCustomer) throw new ConflictError("You have 50 open tickets. Wait for some to be resolved before opening more.");
+}
+
 type Changes = Partial<typeof ticket.$inferInsert>;
 
 /** Leaving `pending_customer`: the waiting time moves the resolution deadline later and the clock runs again. */
@@ -217,12 +226,9 @@ export async function createTicket(actor: Actor, input: unknown): Promise<{ tick
   const result = await db().transaction(async (tx) => {
     await consumeRate(tx, actor.id, "ticket", LIMITS.ticketsPerHour, "You can open 5 tickets per hour. Try again later.");
     await consumeRate(tx, actor.id, "ticket_day", LIMITS.ticketsPerDay, "You can open 20 tickets per day. Try again tomorrow.", { windowSeconds: DAY_SECONDS });
-    // The rate lock above serializes this customer's creates, so the count can't be raced past the cap.
-    const [{ open }] = await tx
-      .select({ open: count() })
-      .from(ticket)
-      .where(and(eq(ticket.customerId, actor.id), ne(ticket.status, "resolved")));
-    if (open >= LIMITS.openPerCustomer) throw new ConflictError("You have 50 open tickets. Wait for some to be resolved before opening more.");
+    // The rate lock above serializes this customer's creates (and reopens, which take the same lock), so the count
+    // can't be raced past the cap.
+    await assertUnderOpenCap(tx, actor.id);
 
     const now = await dbNow(tx);
     const [row] = await tx
@@ -373,6 +379,9 @@ export async function addMessage(actor: Actor, id: string, input: unknown): Prom
         if (!row.resolvedAt || now.getTime() - row.resolvedAt.getTime() > REOPEN_MS) {
           throw new ConflictError("This ticket was resolved more than 7 days ago. Open a follow-up ticket instead.");
         }
+        // Reopening adds to the open count like a new ticket does, so it takes the same per-customer lock and cap.
+        await advisoryLock(tx, `rate:ticket:${row.customerId}`);
+        await assertUnderOpenCap(tx, row.customerId);
         status = "open";
         changes.resolvedAt = null;
       } else if (row.status === "pending_customer") {

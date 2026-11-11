@@ -57,6 +57,13 @@
       "when": 1794416201300,
       "tag": "0007_kb_seed_articles",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1794417478594,
+      "tag": "0008_reply_suggestion",
+      "breakpoints": true
     }
   ]
 }

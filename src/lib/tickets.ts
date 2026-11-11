@@ -10,6 +10,7 @@ import { BadRequestError, ConflictError, NotFoundError } from "@/lib/errors";
 import { log } from "@/lib/log";
 import { mailer } from "@/lib/mail/outbox";
 import { publicSnippet, subjectFor } from "@/lib/mail";
+import { drainPendingTriage, enqueueTriage, runTriageNow } from "@/lib/support-ai";
 import { type TicketSla, dueTimes, firstResponseDueAt, resolutionDueAt, resumeClock as resumeSlaClock, slaView } from "@/lib/sla";
 import { queueOrder, stampBreaches } from "@/lib/sla-db";
 import { type Tx, advisoryLock, consumeRate } from "@/lib/usage";
@@ -214,8 +215,9 @@ function resumeClock(row: typeof ticket.$inferSelect, now: Date): { changes: Cha
 
 /**
  * A customer opens a ticket with its first (public) message. The ticket, the message, the rate-limit rows and the
- * "ticket created" notification commit together or not at all. Triage (issue 11.3) will enqueue its job here,
- * inside this transaction.
+ * "ticket created" notification commit together or not at all, and so does the `triage-ticket` job (issue 11.3).
+ * After the commit the request waits up to 10 s for triage (inline mode); if the model is slow or down the ticket
+ * is already saved, untriaged, and the next agent queue load finishes the job.
  */
 export async function createTicket(actor: Actor, input: unknown): Promise<{ ticket: CustomerTicket; messages: CustomerMessage[] }> {
   const access = contentAccess(actor);
@@ -254,10 +256,12 @@ export async function createTicket(actor: Actor, input: unknown): Promise<{ tick
       subject: subjectFor(`We received your ticket #${row.number}: ${row.subject}`),
       snippet: publicSnippet(message),
     });
-    return { row, message, now };
+    const triageJobId = await enqueueTriage(tx, row.id, actor.id);
+    return { row, message, now, triageJobId };
   });
 
   log.info("ticket.created", { ticketId: result.row.id, by: actor.id });
+  await runTriageNow(result.triageJobId);
   return { ticket: toCustomerTicket(result.row, result.now), messages: [toCustomerMessage(result.message, actor)] };
 }
 
@@ -272,6 +276,8 @@ export async function createTicket(actor: Actor, input: unknown): Promise<{ tick
 export async function listTickets(actor: Actor, query: unknown = {}): Promise<({ tickets: CustomerTicket[] } | { tickets: AgentTicket[] }) & Page> {
   const access = contentAccess(actor);
   const q = listQuery.parse(query);
+  // Agents: finish triage that was left pending before reading the queue, so the rows show it.
+  if (access.kind === "agent" && q.offset === 0) await drainPendingTriage();
   await stampBreaches(db());
   const now = new Date();
   const page = <T,>(rows: T[]): { rows: T[] } & Page => {

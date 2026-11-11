@@ -6,6 +6,23 @@ import type { DemoToolScript } from "./types";
  * Each app adds a fixture for each AI task it defines.
  */
 export const demoFixtures: Record<string, unknown> = {
+  // Helpdesk (spec 11): the guardrails in support-guardrails.ts still run on these. With no candidate articles K1 is
+  // dropped and the reply's confidence is forced to low, so demos stay honest about what grounded them.
+  "ticket-triage": {
+    category: "how_to",
+    priority: "normal",
+    summary: "Demo triage (recorded): customer asks how to do something covered in the knowledge base.",
+    sentiment: "calm",
+    articleRefs: ["K1"],
+    needsHumanBecause: null,
+  },
+  "reply-suggest": {
+    reply:
+      "Thanks for reaching out. The steps in the linked article should cover this; reply here if anything doesn't match what you see.",
+    citations: ["K1"],
+    confidence: "medium",
+    needsHumanBecause: "Demo reply (recorded, not from a live model).",
+  },
   "summarize-items": {
     summary:
       "You have a few open items. The most recent ones focus on setup work; nothing looks overdue.",

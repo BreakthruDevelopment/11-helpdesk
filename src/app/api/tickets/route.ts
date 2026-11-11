@@ -4,6 +4,8 @@ import { errorResponse, readJson } from "@/lib/http";
 import { createTicket, listTickets } from "@/lib/tickets";
 
 export const dynamic = "force-dynamic";
+// Creating a ticket waits up to 10 s for AI triage; an agent's queue load up to 5 s to finish pending triage.
+export const maxDuration = 25;
 
 /** GET /api/tickets: a customer's own tickets, or an agent's queue (?view=unassigned|mine|all&status=&limit=). Admins get 404. */
 export async function GET(request: Request) {

@@ -79,8 +79,8 @@ export function DataList<T>({
         className={tableOnly ? "grid gap-3 sm:hidden" : "grid gap-3 sm:grid-cols-2 lg:grid-cols-3"}
       >
         {rows.map((row) => (
-          <li key={rowKey(row)} className="space-y-2 rounded-card border border-border bg-surface p-4">
-            <h3 className="font-semibold break-words">{primary.cell(row)}</h3>
+          <li key={rowKey(row)} className="min-w-0 space-y-2 rounded-card border border-border bg-surface p-4">
+            <h3 className="font-semibold break-words [overflow-wrap:anywhere]">{primary.cell(row)}</h3>
             <dl className="space-y-1 text-sm">
               {rest
                 .filter((c) => !c.hideLabel)

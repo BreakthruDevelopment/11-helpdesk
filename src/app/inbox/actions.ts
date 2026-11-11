@@ -10,6 +10,7 @@ export async function markRead(_prev: FormState, formData: FormData): Promise<Fo
     const user = await requireUser();
     const all = formField(formData, "all") === "true";
     const id = formField(formData, "id");
+    if (!all && !id) return { error: "Choose a message to mark as read." };
     await markInboxRead(user, all ? { all: true } : { ids: [id] });
     // The unread badge lives in the root layout, so refresh that as well as this page.
     revalidatePath("/", "layout");

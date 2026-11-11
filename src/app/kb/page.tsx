@@ -2,9 +2,11 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { ZodError } from "zod";
 import { formatWhen } from "@/components/format-when";
+import { RateLimited } from "@/components/rate-limited";
 import { FilterBar, PageIntro, Panel, buttonSecondary } from "@/components/ui";
 import { searchPublished } from "@/lib/kb";
 import { stripMarkdown } from "@/lib/kb-markdown";
+import { kbAllowed } from "./limit";
 
 export const metadata: Metadata = { title: "Help articles" };
 export const dynamic = "force-dynamic";
@@ -14,6 +16,8 @@ const PAGE_SIZE = 10;
 type Search = { q?: string; offset?: string };
 
 export default async function KbPage({ searchParams }: { searchParams: Promise<Search> }) {
+  // The same per-IP limit as GET /api/kb, checked before any search.
+  if (!(await kbAllowed())) return <RateLimited />;
   const sp = await searchParams;
   // Same limits as the API (200 chars, no NUL). Anything odd falls back to listing instead of a 500.
   const q = typeof sp.q === "string" ? sp.q.replaceAll("\0", "").trim().slice(0, 200) : "";

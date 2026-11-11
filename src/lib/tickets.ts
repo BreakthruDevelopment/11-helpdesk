@@ -10,6 +10,7 @@ import { BadRequestError, ConflictError, NotFoundError } from "@/lib/errors";
 import { log } from "@/lib/log";
 import { mailer } from "@/lib/mail/outbox";
 import { publicSnippet, subjectFor } from "@/lib/mail";
+import { publishedByIds } from "@/lib/kb";
 import { drainPendingTriage, enqueueTriage, runTriageNow } from "@/lib/support-ai";
 import { type TicketSla, dueTimes, firstResponseDueAt, resolutionDueAt, resumeClock as resumeSlaClock, slaView } from "@/lib/sla";
 import { queueOrder, stampBreaches } from "@/lib/sla-db";
@@ -361,7 +362,14 @@ export async function getTicket(
     .where(and(eq(ticketMessage.ticketId, tid), messageScope(access)))
     .orderBy(desc(ticketMessage.createdAt), desc(ticketMessage.id))
     .limit(THREAD_WINDOW);
-  return { ticket: toAgentTicket(found.ticket, found.customerName, new Date()), messages: messages.reverse().map((m) => ({ ...m.message, authorName: m.authorName })) };
+  const agentTicket = toAgentTicket(found.ticket, found.customerName, new Date());
+  // Show only articles that are published now: one unpublished since triage is left out, as on the triage route.
+  const stored = agentTicket.triage as { articleIds?: unknown } | null;
+  if (stored && Array.isArray(stored.articleIds)) {
+    const live = await publishedByIds(stored.articleIds.filter((x): x is string => typeof x === "string"));
+    agentTicket.triage = { ...stored, articleIds: live.map((a) => a.id) };
+  }
+  return { ticket: agentTicket, messages: messages.reverse().map((m) => ({ ...m.message, authorName: m.authorName })) };
 }
 
 // ---------------------------------------------------------------------------

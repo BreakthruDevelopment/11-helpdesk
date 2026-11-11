@@ -8,7 +8,7 @@
 # the reply and not the note on the ticket page and in the inbox, first response stamped, pending_customer pauses the
 # clock and A's reply resumes it, due times and the SLA state are set, the agent queue is ordered, and the agent
 # writes knowledge-base articles (a draft stays out of public search and its /kb page is 404 until published).
-# AI (demo mode in CI): the new ticket was triaged at creation (set by AI, never urgent), the agent can re-triage and
+# AI (demo mode in CI): the new ticket was triaged at creation (never urgent; recorded demo triage is not applied), the agent can re-triage and
 # ask for a suggested reply, the draft is not sent (message count unchanged) and neither the draft nor the triage
 # reaches the customer. Always: customers can't trigger or read triage or suggested replies (403), nor can
 # anonymous callers (401).
@@ -223,7 +223,8 @@ if [ -n "${SMOKE_AGENT_EMAIL:-}" ] && [ -n "${SMOKE_AGENT_PASSWORD:-}" ]; then
   # AI (demo mode in CI): triage ran when the ticket was created, and the agent can re-run it and ask for a draft.
   # The draft is advice for the agent: nothing is sent, and neither it nor the triage is visible to the customer.
   agent_view=$(curl -fsS -b "$JAR_G" "$BASE_URL/api/tickets/$TID")
-  [ "$(echo "$agent_view" | jget 'j.ticket.triageSource')" = "ai" ] || fail "the new ticket should have been triaged at creation (set by AI): $agent_view"
+  # Live model: applied and marked set by AI. Demo mode: the recorded card is stored but category and priority are not applied.
+  [ "$(echo "$agent_view" | jget 'j.ticket.triageSource')" = "ai" ] || [ "$(echo "$agent_view" | jget 'j.ticket.triage.demo')" = "true" ] || fail "the new ticket should have been triaged at creation: $agent_view"
   [ -n "$(echo "$agent_view" | jget 'j.ticket.triage.summary')" ] || fail "the triage has no summary: $agent_view"
   [ "$(echo "$agent_view" | jget 'j.ticket.priority')" != "urgent" ] || fail "triage must never set urgent: $agent_view"
   msgs_before=$(echo "$agent_view" | jget 'j.messages.length')

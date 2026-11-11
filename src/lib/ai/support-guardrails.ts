@@ -164,14 +164,30 @@ export const POLICY_RULES = [
   { code: "card", label: "Mentions card details", stems: ["card number", "card details", "cvv", "security code"] },
   { code: "identity", label: "Asks for identity or one-time codes", stems: ["social security", "ssn", "one-time code", "verification code", "2fa code"] },
 ] as const;
-export type PolicyCode = (typeof POLICY_RULES)[number]["code"] | "timeframe";
+export type PolicyCode = (typeof POLICY_RULES)[number]["code"] | "timeframe" | "contact";
 
 export const POLICY_LABELS: Record<PolicyCode, string> = {
   ...Object.fromEntries(POLICY_RULES.map((r) => [r.code, r.label])),
   timeframe: "Promises a timeframe",
+  contact: "Possible contact details or link: check before sending",
 } as Record<PolicyCode, string>;
 
 const TIMEFRAME = /\b(?:within|in|by)\s+(?:the\s+next\s+)?\d+(?:\s*(?:-|to)\s*\d+)?\s*(?:minutes?|hours?|hrs?|days?|weeks?)\b|\b(?:today|tonight|tomorrow|asap|right away|immediately)\b/;
+
+/**
+ * Things that point a customer somewhere without being a URL the link scan removes: phone numbers, @handles, bare IPs,
+ * obfuscated domains ("evil dot com", "evil[.]com", "evil . com") and internationalised domains (non-ASCII letters).
+ * Flagged for the agent, not stripped: the scan can't be complete, so the agent reads every draft anyway.
+ */
+const CONTACT_PATTERNS: RegExp[] = [
+  /\+\d[\d\s().-]{7,}\d|\(\d{3}\)\s*\d{3}[\s.-]?\d{4}|\b\d{3}[\s.-]\d{3}[\s.-]\d{4}\b/, // phone numbers
+  /(?:^|[\s(])@[\p{L}\p{N}_.]{3,}/u, // @handles
+  /\b\d{1,3}(?:\.\d{1,3}){3}\b/, // bare IPs
+  /[\p{L}\p{N}-]+\s*(?:\[\s*\.\s*\]|\(\s*\.\s*\)|\{\s*\.\s*\})\s*\p{L}{2,}/u, // evil[.]com
+  /[\p{L}\p{N}-]+\s+(?:dot|d0t)\s+(?:com|net|org|io|co|ru|xyz|info|biz|app|dev|me|support|help)\b/iu, // evil dot com
+  /[\p{L}\p{N}-]+\s+\.\s*\p{L}{2,}\b|[\p{L}\p{N}-]+\s*\.\s+\p{L}{2,}\/\S*/u, // spaced dots
+  /[\p{L}\p{N}-]*[^\x00-\x7F][\p{L}\p{N}-]*\.\p{L}{2,}(?![\p{L}\p{N}])/u, // IDN domains
+];
 
 /**
  * Policy codes for phrases an agent should double-check before sending. Matched on the normalised text and on a
@@ -190,6 +206,7 @@ export function policyFlags(reply: string): PolicyCode[] {
     if (hit) found.push(rule.code);
   }
   if (TIMEFRAME.test(text)) found.push("timeframe");
+  if (CONTACT_PATTERNS.some((re) => re.test(normalize(reply)))) found.push("contact");
   return found;
 }
 

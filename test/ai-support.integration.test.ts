@@ -316,12 +316,12 @@ describe.skipIf(!url)("AI triage and suggested replies (Postgres)", () => {
       }
     });
 
-    it("with a live provider down, no recorded text is written, the budget is refunded and the job waits to retry", async () => {
+    it("with a live provider down, no recorded text is written, the reached call stays charged, and the job waits to retry", async () => {
       answers.triage = 500;
       const id = await open(ada);
       expect(await row(id)).toMatchObject({ triage: null, triage_source: "none" });
       expect(await jobFor(id)).toMatchObject({ status: "queued", attempts: 1 });
-      expect(await aiToday()).toBe(0);
+      expect(await aiToday()).toBe(1); // the provider was reached, so the call stays charged
     });
 
     it("an agent's next queue load finishes triage that was left pending", async () => {
@@ -406,6 +406,7 @@ describe.skipIf(!url)("AI triage and suggested replies (Postgres)", () => {
       expect(reply.prompt).toContain("Agent: We are looking at the charges.");
       expect(reply.prompt).toContain("[K1] Zorblax duplicate charge on your statement");
       expect(reply.system).toMatch(/untrusted data/i);
+      expect(reply.system).toMatch(/agent messages may .*customer names/i);
     });
 
     it("only the newest 6 public messages are sent", async () => {
@@ -487,7 +488,7 @@ describe.skipIf(!url)("AI triage and suggested replies (Postgres)", () => {
       expect(s.citations).toEqual([]);
     });
 
-    it("an unusable answer is a safe error: 502, no draft stored, and the rate and the daily budget are refunded", async () => {
+    it("an unusable answer is a safe error: 502, no draft stored, and the calls stay charged (the provider was reached)", async () => {
       const id = await open(ada);
       const budget = await aiToday();
       for (const bad of ["not json", replyAnswer({ reply: "x".repeat(1600) }), replyAnswer({ reply: "" })]) {
@@ -497,7 +498,20 @@ describe.skipIf(!url)("AI triage and suggested replies (Postgres)", () => {
         expect(r.text).not.toMatch(/stack|at .*\.ts/);
       }
       expect(await sql`select 1 from reply_suggestion where ticket_id = ${id}`).toHaveLength(0);
+      expect(await rates(gina.id, "suggest")).toBe(3);
+      expect(await aiToday()).toBe(budget + 3);
+    });
+
+    it("when the provider was never reached (no key configured) the rate and daily budget are refunded", async () => {
+      const id = await open(ada);
+      const budget = await aiToday();
+      vi.stubEnv("GEMINI_API_KEY", "");
+      (await import("@/lib/env")).resetEnvCache();
+      calls.length = 0;
+      for (const r of [await suggest(gina, id), await retriage(gina, id)]) expect(r.status).toBe(502);
+      expect(calls).toHaveLength(0);
       expect(await rates(gina.id, "suggest")).toBe(0);
+      expect(await rates(gina.id, "retriage")).toBe(0);
       expect(await aiToday()).toBe(budget);
     });
 
@@ -553,13 +567,58 @@ describe.skipIf(!url)("AI triage and suggested replies (Postgres)", () => {
       expect((await row(id)).triage.summary).toBe("Fresh card.");
     });
 
-    it("a failed re-triage refunds its rate and budget and leaves the card alone", async () => {
+    it("never rewrites an urgent ticket, even one whose triage source is 'none': priority, category and due times stay", async () => {
+      const id = await open(ada);
+      await sql`update ticket set priority = 'urgent', category = 'technical', triage_source = 'none', triage = null where id = ${id}`;
+      const before = await row(id);
+      answers.triage = triageAnswer({ category: "how_to", priority: "normal", summary: "Fresh card." });
+      const r = await retriage(gina, id);
+      expect(r.status).toBe(200);
+      expect(r.body.applied).toEqual({ category: false, priority: false });
+      const after = await row(id);
+      expect(after).toMatchObject({ priority: "urgent", category: "technical", triage_source: "none", version: before.version });
+      expect(new Date(after.first_response_due_at).getTime()).toBe(new Date(before.first_response_due_at).getTime());
+      expect(new Date(after.resolution_due_at).getTime()).toBe(new Date(before.resolution_due_at).getTime());
+      expect(after.triage.summary).toBe("Fresh card.");
+    });
+
+    it("a ticket an agent-handled or seeded as 'agent' is never rewritten; a ticket never triaged (source none, no card) is", async () => {
+      const id = await open(ada);
+      await sql`update ticket set triage_source = 'agent', triage = null, priority = 'high', category = 'bug' where id = ${id}`;
+      answers.triage = triageAnswer({ category: "billing", priority: "low" });
+      expect((await retriage(gina, id)).body.applied).toEqual({ category: false, priority: false });
+      await sql`update ticket set triage_source = 'none', triage = null, priority = 'normal', category = 'other' where id = ${id}`;
+      expect((await retriage(hank, id)).body.applied).toEqual({ category: true, priority: true });
+    });
+
+    it("a recorded (demo) triage stores the card but changes neither category nor priority", async () => {
+      vi.stubEnv("AI_PROVIDER", "demo");
+      (await import("@/lib/env")).resetEnvCache();
+      const id = await open(ada);
+      const t = await row(id);
+      expect(t).toMatchObject({ category: "other", priority: "normal", triage_source: "none", version: 1 });
+      expect(t.triage).toMatchObject({ demo: true });
+      expect(t.triage.summary).toMatch(/^Demo triage \(recorded\)/);
+    });
+
+    it("the agent ticket view lists only published article ids; the stored count is the locked count plus one", async () => {
+      const id = await open(ada);
+      await sql`update kb_article set status = 'draft' where id = ${articleId}`;
+      as(gina);
+      expect((await json(await TID.GET(req(`/api/tickets/${id}`), ctx(id)))).body.ticket.triage.articleIds).toEqual([]);
+      await sql`update kb_article set status = 'published' where id = ${articleId}`;
+      expect((await json(await TID.GET(req(`/api/tickets/${id}`), ctx(id)))).body.ticket.triage.articleIds).toEqual([articleId]);
+      const r = await retriage(gina, id);
+      expect(r.body.triage.retriagesLeft).toBe(2);
+    });
+
+    it("a failed re-triage (provider reached) keeps its charge and leaves the card alone", async () => {
       const id = await open(ada);
       const budget = await aiToday();
       answers.triage = triageAnswer({ priority: "urgent" });
       expect((await retriage(gina, id)).status).toBe(502);
-      expect(await rates(gina.id, "retriage")).toBe(0);
-      expect(await aiToday()).toBe(budget);
+      expect(await rates(gina.id, "retriage")).toBe(1);
+      expect(await aiToday()).toBe(budget + 1);
       expect((await row(id)).triage.retriages).toBe(0);
     });
   });

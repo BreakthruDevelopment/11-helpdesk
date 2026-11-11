@@ -3,7 +3,7 @@ import { and, asc, desc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { assertAgent, ticketScope } from "@/lib/access";
 import { retrieveForAi, publishedByIds } from "@/lib/kb";
-import { runReplySuggest, runTriage } from "@/lib/ai/support";
+import { ModelNotReachedError, runReplySuggest, runTriage } from "@/lib/ai/support";
 import { POLICY_LABELS, type PolicyCode, type SupportArticle, type TriageResult, triageResult } from "@/lib/ai/support-guardrails";
 import { AiError } from "@/lib/ai/types";
 import type { Actor } from "@/lib/auth/rbac";
@@ -129,7 +129,11 @@ const retriageCount = (row: Pick<TicketRow, "triage">) => {
  * Status, assignee and the customer-facing activity time are never touched. Returns what was applied.
  */
 async function applyTriage(tx: Tx, row: TicketRow, result: TriageResult, opts: { demo: boolean; retriages: number }): Promise<{ category: boolean; priority: boolean }> {
-  const apply = row.triageSource !== "agent";
+  // Only AI-set tickets, or untouched ones that were never triaged, may be changed; never a recorded (demo) answer,
+  // and never an urgent ticket (only agents set urgent, and the AI can't un-set it). Seeded or agent-edited tickets
+  // carry `triage_source = 'agent'`.
+  const eligible = !opts.demo && (row.triageSource === "ai" || (row.triageSource === "none" && row.triage === null));
+  const apply = eligible && row.priority !== "urgent";
   const categoryChanged = apply && result.category !== row.category;
   const priorityChanged = apply && result.priority !== row.priority;
   const now = new Date();
@@ -189,6 +193,11 @@ function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
   });
 }
 
+/** True when the failure happened before any request could have gone to the provider. */
+function neverReached(err: unknown): boolean {
+  return err instanceof ModelNotReachedError || (err instanceof AiError && err.kind === "input_rejected");
+}
+
 /** Map a failed model call to how the queue should treat it. */
 function jobFailure(err: unknown): JobError {
   if (err instanceof JobError) return err;
@@ -217,13 +226,16 @@ export const triageTicketJob: JobHandler = async (job, ctx) => {
   }
 
   let out;
+  let reached = false;
   try {
     const message = await firstCustomerMessage(row.id);
     const candidates = label(await retrieveForAi(`${row.subject} ${message}`, SUPPORT_AI_LIMITS.candidates));
+    reached = true;
     out = await untilAborted(runTriage({ subject: row.subject, firstMessage: message, candidates }).then((r) => ({ ...r, candidates })), ctx.signal);
   } catch (err) {
-    // A timeout may still be running at the provider: keep its reservation. Anything else produced nothing: refund.
-    if (!(err instanceof JobError && err.code === "timeout")) await releaseDaily(db(), "ai").catch(() => undefined);
+    // Refund only when the provider was never reached. A timeout, an outage, unusable output or a refused fallback
+    // all cost a call (or may have), so they keep the charge.
+    if (!reached || neverReached(err)) await releaseDaily(db(), "ai").catch(() => undefined);
     throw jobFailure(err);
   }
 
@@ -299,25 +311,27 @@ export async function retriage(actor: Actor, id: string): Promise<{ triage: Tria
   await reserveAgentCall(actor, "retriage", SUPPORT_AI_LIMITS.retriagesPerAgentHour, "You can re-triage 30 times per hour. Try again later.");
 
   let out;
+  let reached = false;
   try {
     const message = await firstCustomerMessage(row.id);
     const candidates = label(await retrieveForAi(`${row.subject} ${message}`, SUPPORT_AI_LIMITS.candidates));
+    reached = true;
     out = await runTriage({ subject: row.subject, firstMessage: message, candidates });
   } catch (err) {
-    await refundAgentCall(actor, "retriage");
+    if (!reached || neverReached(err)) await refundAgentCall(actor, "retriage");
     throw err;
   }
 
-  const applied = await db().transaction(async (tx) => {
+  const { applied, count } = await db().transaction(async (tx) => {
     const [locked] = await tx.select().from(ticket).where(eq(ticket.id, row.id)).for("update");
     if (!locked) throw new NotFoundError();
     // The cap again under the lock: two clicks at once can't both be the third.
     const count = retriageCount(locked);
     if (count >= SUPPORT_AI_LIMITS.retriagesPerTicket) throw new TooManyRequestsError("This ticket has already been re-triaged 3 times.");
-    return applyTriage(tx, locked, out.result, { demo: out.demo, retriages: count + 1 });
+    return { applied: await applyTriage(tx, locked, out.result, { demo: out.demo, retriages: count + 1 }), count };
   });
   log.info("ticket.triaged", { ticketId: row.id, how: "agent", by: actor.id, demo: out.demo });
-  return { triage: await toTriageView({ ...out.result, retriages: used + 1, demo: out.demo, at: new Date().toISOString() }), applied };
+  return { triage: await toTriageView({ ...out.result, retriages: count + 1, demo: out.demo, at: new Date().toISOString() }), applied };
 }
 
 /** The ticket's triage as an agent sees it, or null when there is none yet. */
@@ -410,6 +424,7 @@ export async function suggestReply(actor: Actor, id: string): Promise<ReplySugge
   await reserveAgentCall(actor, "suggest", SUPPORT_AI_LIMITS.suggestionsPerAgentHour, "You can request 20 suggested replies per hour. Try again later.");
 
   let out;
+  let reached = false;
   let basedOn: string | null = null;
   try {
     // Newest first, public only: `visibility = 'public'` is in the SQL, so a note is never read, let alone sent.
@@ -428,9 +443,10 @@ export async function suggestReply(actor: Actor, id: string): Promise<ReplySugge
     const extra = (await publishedByIds(picks)).filter((a) => !found.some((f) => f.id === a.id));
     const articles = label([...found, ...extra].slice(0, SUPPORT_AI_LIMITS.replyArticles));
 
+    reached = true;
     out = await runReplySuggest({ subject: row.subject, messages, articles });
   } catch (err) {
-    await refundAgentCall(actor, "suggest");
+    if (!reached || neverReached(err)) await refundAgentCall(actor, "suggest");
     throw err;
   }
 

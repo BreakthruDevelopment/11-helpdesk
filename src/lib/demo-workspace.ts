@@ -276,7 +276,8 @@ async function loadDemo(actor: Actor, mode: "admin" | "cli", now: Date): Promise
           category: spec.category,
           assigneeId: spec.assignee ? id(spec.assignee) : null,
           triage: spec.ai ? aiTriage(spec.category, spec.subject) : null,
-          triageSource: spec.ai ? "ai" : "none",
+          // Seeded tickets that were not AI-triaged count as agent-handled, so re-triage can never rewrite them.
+          triageSource: spec.ai ? "ai" : "agent",
           firstResponseDueAt: firstResponseDueAt(spec.priority, created),
           resolutionDueAt: resolutionDueAt(spec.priority, created, pausedSeconds),
           firstRespondedAt: firstAgentReply ? offset(firstAgentReply.at) : null,

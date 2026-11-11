@@ -129,6 +129,19 @@ describe("policy phrases", () => {
   });
 });
 
+describe("contact details and obfuscated links (a chip, not a removal)", () => {
+  it.each(["evil dot com/login", "evil[.]com", "+1 (555) 010-0199", "@evilsupport", "10.0.0.1/login", "пример.рф/login", "evil . com/login", "evil(.)com"])("flags %s", (text) => {
+    expect(policyFlags(`Please contact ${text} now`)).toContain("contact");
+  });
+
+  it("leaves ordinary prose unflagged, and keeps the text in the draft", () => {
+    for (const ok of ["Open Settings > Billing, e.g. the History tab.", "Version 2.0 costs 3.5 times less.", "It takes 3 to 5 business days, or 2 hours."]) expect(policyFlags(ok), ok).not.toContain("contact");
+    const r = sanitizeReply(replyModelOutput.parse(reply({ reply: "Call +1 (555) 010-0199 or write to evil dot com/login." })), [art(1, ID1)]);
+    expect(r.draft.reply).toContain("555");
+    expect(r.policy).toContain("contact");
+  });
+});
+
 describe("sanitizeReply", () => {
   const articles = [art(1, ID1, "Open Settings > Billing. Status: https://status.example.com"), art(2, ID2, "Other.")];
 

@@ -12,6 +12,11 @@
 # ask for a suggested reply, the draft is not sent (message count unchanged) and neither the draft nor the triage
 # reaches the customer. Always: customers can't trigger or read triage or suggested replies (403), nor can
 # anonymous callers (401).
+# Desk pages (issue 11.5, agent side): /desk lists the ticket with SLA chips in every view, /desk/[id] shows the
+# thread with the note marked internal, the triage card, Suggest reply and the assignee control as plain text, and the
+# KB editor list, new and edit pages render (a deleted article's editor page is 404). Signed-out visitors and
+# customers are sent away from /desk*. Admin (only when SMOKE_ADMIN_EMAIL and SMOKE_ADMIN_PASSWORD are set; CI seeds
+# one): /admin shows counts, users and the demo button and never a ticket subject; admins can't open the desk.
 #   BASE_URL=https://app11.breakthruventures.ai ./scripts/smoke.sh
 set -euo pipefail
 
@@ -40,11 +45,11 @@ echo "$home" | grep -q 'href="/support"' || fail "home should link to the suppor
 echo "$home" | grep -q 'href="/kb"' || fail "home should link to the knowledge base"
 pass "pages render inside the shared shell"
 
-for path in /dashboard /admin /support /support/new /inbox; do
+for path in /dashboard /admin /support /support/new /inbox /desk /desk/kb /desk/kb/new; do
   code=$(status "$BASE_URL$path")
   [ "$code" = "307" ] || fail "signed-out $path should redirect (307), got $code"
 done
-pass "signed-out dashboard, admin, portal and inbox redirect"
+pass "signed-out dashboard, admin, portal, inbox, desk and KB editor redirect"
 
 signup() {
   local jar=$1 email=$2
@@ -77,6 +82,10 @@ pass "portal and inbox render for a customer"
 # Sign-up can't choose a role: a customer is refused the agent endpoints.
 code=$(status -b "$JAR_A" "$BASE_URL/api/admin/stats")
 [ "$code" = "403" ] || fail "a customer reading admin stats should be 403, got $code"
+for path in /desk /desk/kb /desk/kb/new; do
+  hdrs=$(curl -s -o /dev/null -D - -b "$JAR_A" "$BASE_URL$path")
+  echo "$hdrs" | tr -d '\r' | grep -qi '^location: .*/support$' || fail "a customer opening $path should be sent to /support: $hdrs"
+done
 pass "customers have no admin access"
 
 code=$(status "$BASE_URL/api/tickets")
@@ -202,6 +211,32 @@ if [ -n "${SMOKE_AGENT_EMAIL:-}" ] && [ -n "${SMOKE_AGENT_PASSWORD:-}" ]; then
   [ "$code" = "201" ] || fail "agent public reply should be 201, got $code"
   pass "agent added an internal note and a public reply"
 
+  # Agent desk pages (issue 11.5): the queue lists the ticket with an SLA chip; the ticket view shows the thread with
+  # the note marked internal, the triage card and the reply box; everything is plain text.
+  dash_headers=$(curl -s -o /dev/null -D - -b "$JAR_G" "$BASE_URL/dashboard")
+  echo "$dash_headers" | tr -d '\r' | grep -qi '^location: .*/desk$' || fail "an agent's dashboard should redirect to /desk: $dash_headers"
+  admin_headers=$(curl -s -o /dev/null -D - -b "$JAR_G" "$BASE_URL/admin")
+  echo "$admin_headers" | tr -d '\r' | grep -qi '^location: .*/desk$' || fail "an agent opening /admin should be sent to /desk: $admin_headers"
+  desk=$(curl -fsS -b "$JAR_G" "$BASE_URL/desk?view=all") || fail "desk queue did not render"
+  echo "$desk" | grep -q 'Explore breakthruventures.ai' || fail "desk is missing the shared footer"
+  echo "$desk" | grep -q "href=\"/desk/$TID\"" || fail "desk queue should link to the ticket"
+  echo "$desk" | grep -q 'SLA: ' || fail "desk queue missing SLA chips"
+  echo "$desk" | grep -q 'href="/desk/kb"' || fail "agent header should link to the KB editor"
+  for v in unassigned mine; do
+    curl -fsS -b "$JAR_G" "$BASE_URL/desk?view=$v" | grep -q 'aria-current="page"' || fail "desk view $v did not render"
+  done
+  desk_ticket=$(curl -fsS -b "$JAR_G" "$BASE_URL/desk/$TID") || fail "desk ticket page did not render"
+  echo "$desk_ticket" | grep -q "$NOTE" || fail "the desk ticket page should show the internal note to agents"
+  echo "$desk_ticket" | grep -q 'Internal note' || fail "the note is not marked internal"
+  echo "$desk_ticket" | grep -q 'looking into your login problem' || fail "the desk ticket page is missing the public reply"
+  echo "$desk_ticket" | grep -q 'AI triage' || fail "the desk ticket page is missing the triage card"
+  echo "$desk_ticket" | grep -q 'Suggest reply' || fail "the desk ticket page is missing Suggest reply"
+  echo "$desk_ticket" | grep -q 'Assign to me' || fail "the desk ticket page is missing the assignee control"
+  echo "$desk_ticket" | grep -F -q 'plain-text-canary &lt;b&gt;not-html&lt;/b&gt;' || fail "the desk rendered the message as something other than plain text"
+  echo "$desk_ticket" | grep -F -q '<b>not-html</b>' && fail "the desk rendered the message as HTML"
+  [ "$(status -b "$JAR_G" "$BASE_URL/desk/00000000-0000-4000-8000-000000000000")" = "404" ] || fail "an unknown desk ticket should be 404"
+  pass "agent desk: queue with SLA chips, ticket view with the internal note marked, triage card and reply box"
+
   a_view=$(curl -fsS -b "$JAR_A" "$BASE_URL/api/tickets/$TID")
   echo "$a_view" | grep -q 'looking into your login problem' || fail "customer A should see the public reply"
   echo "$a_view" | grep -q "$NOTE" && fail "customer A can see the internal note"
@@ -279,13 +314,41 @@ if [ -n "${SMOKE_AGENT_EMAIL:-}" ] && [ -n "${SMOKE_AGENT_PASSWORD:-}" ]; then
   kb_art=$(curl -fsS "$BASE_URL/kb/$KB_SLUG") || fail "the published article's /kb page should render"
   echo "$kb_art" | grep -q "Steps about $KB_WORD" || fail "the published article page is missing its body"
   curl -fsS "$BASE_URL/kb?q=$KB_WORD" | grep -q "href=\"/kb/$KB_SLUG\"" || fail "the published article should be listed on /kb"
+  kb_list=$(curl -fsS -b "$JAR_G" "$BASE_URL/desk/kb?q=$KB_WORD") || fail "KB editor list did not render"
+  echo "$kb_list" | grep -q "href=\"/desk/kb/$KB_ID\"" || fail "KB editor list should link to the article"
+  kb_edit=$(curl -fsS -b "$JAR_G" "$BASE_URL/desk/kb/$KB_ID") || fail "KB editor page did not render"
+  echo "$kb_edit" | grep -q "Steps about $KB_WORD" || fail "KB editor page missing the body"
+  echo "$kb_edit" | grep -q 'Unpublish' || fail "KB editor page should offer Unpublish for a published article"
+  echo "$kb_edit" | grep -q 'Delete article' || fail "KB editor page missing delete"
+  curl -fsS -b "$JAR_G" "$BASE_URL/desk/kb/new" | grep -q 'Save as draft' || fail "new article page missing its form"
   code=$(status -X DELETE -b "$JAR_G" -H "origin: $BASE_URL" "$BASE_URL/api/kb/articles/$KB_ID")
   [ "$code" = "204" ] || fail "agent delete should be 204, got $code"
   [ "$(curl -fsS "$BASE_URL/api/kb?q=$KB_WORD" | jget 'j.articles.length')" = "0" ] || fail "a deleted article is still searchable"
   [ "$(status "$BASE_URL/kb/$KB_SLUG")" = "404" ] || fail "a deleted article's /kb page should be 404"
-  pass "agent drafted, published and deleted an article; the draft never showed in public search"
+  [ "$(status -b "$JAR_G" "$BASE_URL/desk/kb/$KB_ID")" = "404" ] || fail "a deleted article's editor page should be 404"
+  pass "agent drafted, published and deleted an article; the draft never showed in public search; the KB editor pages render"
 else
   echo "skip - agent checks (set SMOKE_AGENT_EMAIL and SMOKE_AGENT_PASSWORD)"
+fi
+
+# Admin page (only when SMOKE_ADMIN_EMAIL and SMOKE_ADMIN_PASSWORD are set): counts, users and the demo button, and
+# never a ticket subject. The demo button itself is not pressed here (it is rate limited per day).
+if [ -n "${SMOKE_ADMIN_EMAIL:-}" ] && [ -n "${SMOKE_ADMIN_PASSWORD:-}" ]; then
+  JAR_M="$(mktemp)"
+  curl -fsS -c "$JAR_M" -b "$JAR_M" -H 'content-type: application/json' -H "origin: $BASE_URL" \
+    -d "{\"email\":\"$SMOKE_ADMIN_EMAIL\",\"password\":\"$SMOKE_ADMIN_PASSWORD\"}" \
+    "$BASE_URL/api/auth/sign-in/email" >/dev/null || fail "admin sign-in failed"
+  admin_page=$(curl -fsS -b "$JAR_M" "$BASE_URL/admin") || fail "admin page did not render"
+  for want in 'Helpdesk overview' 'Resolution breaches' 'AI calls today' 'Load demo workspace' 'Make agent'; do
+    echo "$admin_page" | grep -q "$want" || fail "admin page missing: $want"
+  done
+  echo "$admin_page" | grep -q 'cannot log in' && fail "the admin page shows a ticket subject"
+  desk_headers=$(curl -s -o /dev/null -D - -b "$JAR_M" "$BASE_URL/desk")
+  echo "$desk_headers" | tr -d '\r' | grep -qi '^location: .*/admin$' || fail "an admin opening /desk should be sent to /admin: $desk_headers"
+  rm -f "$JAR_M"
+  pass "admin page shows counts, users and the demo button, no ticket contents; admins can't open the desk"
+else
+  echo "skip - admin checks (set SMOKE_ADMIN_EMAIL and SMOKE_ADMIN_PASSWORD)"
 fi
 
 code=$(status -X PATCH -b "$JAR_A" -H 'content-type: application/json' -H "origin: $BASE_URL" -d '{"action":"resolve"}' "$BASE_URL/api/tickets/$TID")

@@ -43,6 +43,7 @@ export async function AppShell({ children, nav }: { children: ReactNode; nav?: R
   const links = NAV_LINKS.filter((l) => {
     if (l.adminOnly && user?.role !== "admin") return false;
     if (l.customerOnly && user?.role !== "user") return false;
+    if (l.agentOnly && user?.role !== "agent") return false;
     if (l.signedIn && !user) return false;
     return true;
   }).map((l) => ({

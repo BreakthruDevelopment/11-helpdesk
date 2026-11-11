@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { PageIntro, Panel, buttonPrimary } from "@/components/ui";
+import { PageIntro, Panel, buttonOutlineAccent, buttonPrimary } from "@/components/ui";
 
 const points = [
   { title: "Two portals, one wall", body: "Customers see only their own tickets and the replies written for them. Internal notes never leave the agent desk." },
@@ -15,9 +15,17 @@ export default function Home() {
         title="Support tickets you own."
         description="Customers open tickets in a portal; agents work a queue with SLA clocks. A demo of a self-hosted Zendesk alternative."
         actions={
-          <Link href="/sign-in" className={buttonPrimary}>
-            Sign in
-          </Link>
+          <>
+            <Link href="/support" className={buttonPrimary}>
+              Support portal
+            </Link>
+            <Link href="/kb" className={buttonOutlineAccent}>
+              Help articles
+            </Link>
+            <Link href="/sign-in" className={buttonOutlineAccent}>
+              Sign in
+            </Link>
+          </>
         }
       />
       <div className="grid gap-x-4 sm:grid-cols-3">

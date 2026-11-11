@@ -9,8 +9,13 @@ export const APP_DESCRIPTION = "Part of the Breakthru Ventures 30 apps in 30 day
 
 export const PARENT_SITE = { href: "https://breakthruventures.ai", label: "Explore breakthruventures.ai" };
 
-/** Header navigation. `adminOnly` links are hidden for other users; pages still enforce the role. */
-export const NAV_LINKS: { href: string; label: string; adminOnly?: boolean }[] = [
-  // The customer, agent and inbox links arrive with the portal and desk pages (issues 11.4 and 11.5).
+/**
+ * Header navigation. Visibility flags only hide a link; every page still enforces its role.
+ * `customerOnly` is the portal. The agent desk link arrives with issue 11.5.
+ */
+export const NAV_LINKS: { href: string; label: string; adminOnly?: boolean; customerOnly?: boolean; signedIn?: boolean }[] = [
+  { href: "/kb", label: "Help" },
+  { href: "/support", label: "Support", customerOnly: true },
+  { href: "/inbox", label: "Inbox", signedIn: true },
   { href: "/admin", label: "Admin", adminOnly: true },
 ];

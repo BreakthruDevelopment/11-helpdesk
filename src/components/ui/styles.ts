@@ -13,4 +13,7 @@ export const buttonDanger = `${buttonBase} border border-border bg-surface text-
 export const inputClass =
   "min-h-11 w-full rounded-card border border-border-strong bg-surface px-3 py-2 text-base text-foreground placeholder:text-muted focus:border-accent";
 
+export const textareaClass =
+  "min-h-32 w-full rounded-card border border-border-strong bg-surface px-3 py-2 text-base text-foreground placeholder:text-muted focus:border-accent";
+
 export const labelClass = "block space-y-1 text-sm font-medium";

@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # End-to-end smoke test against a running app (local, CI, or a deployed URL).
-# Customer side (always): two customers sign up; A opens a ticket; B gets 404 on it and 403 on triage; writes are
-# refused without our Origin. Agent side (only when SMOKE_AGENT_EMAIL and SMOKE_AGENT_PASSWORD are set; CI seeds an
-# agent with `pnpm db:seed`, the live smoke covers the customer side only): internal note plus public reply, A sees
-# the reply and not the note, the inbox message has no note text, first response stamped, pending_customer pauses
-# the clock and A's reply resumes it, due times and the SLA state are set, the agent queue is ordered, and the agent
-# writes knowledge-base articles (a draft stays out of public search until published). Always: public KB search
-# finds a seeded article, and customers can't write articles. The AI triage checks arrive with 11.3.
+# Customer side (always): two customers sign up; A opens a ticket; the portal lists it and the thread renders the
+# message as text; B gets 404 on the page and the API and 403 on triage; writes are refused without our Origin.
+# Public KB (always): search finds a seeded article, /kb and /kb/[slug] render published articles as plain text, and
+# customers can't write articles. Agent side (only when SMOKE_AGENT_EMAIL and SMOKE_AGENT_PASSWORD are set; CI seeds
+# an agent with `pnpm db:seed`, the live smoke covers the customer side only): internal note plus public reply, A sees
+# the reply and not the note on the ticket page and in the inbox, first response stamped, pending_customer pauses the
+# clock and A's reply resumes it, due times and the SLA state are set, the agent queue is ordered, and the agent
+# writes knowledge-base articles (a draft stays out of public search and its /kb page is 404 until published).
+# The AI triage checks arrive with 11.3.
 #   BASE_URL=https://app11.breakthruventures.ai ./scripts/smoke.sh
 set -euo pipefail
 
@@ -30,13 +32,16 @@ for path in / /sign-in; do
   page=$(curl -fsS "$BASE_URL$path") || fail "page $path did not render"
   echo "$page" | grep -q 'Explore breakthruventures.ai' || fail "page $path is missing the shared footer"
 done
+home=$(curl -fsS "$BASE_URL/") || fail "home did not render"
+echo "$home" | grep -q 'href="/support"' || fail "home should link to the support portal"
+echo "$home" | grep -q 'href="/kb"' || fail "home should link to the knowledge base"
 pass "pages render inside the shared shell"
 
-for path in /dashboard /admin; do
+for path in /dashboard /admin /support /support/new /inbox; do
   code=$(status "$BASE_URL$path")
   [ "$code" = "307" ] || fail "signed-out $path should redirect (307), got $code"
 done
-pass "signed-out dashboard and admin redirect"
+pass "signed-out dashboard, admin, portal and inbox redirect"
 
 signup() {
   local jar=$1 email=$2
@@ -49,6 +54,23 @@ signup "$JAR_A" "smoke-a-$RUN_ID@example.test"
 signup "$JAR_B" "smoke-b-$RUN_ID@example.test"
 pass "two customers signed up"
 
+code=$(status -b "$JAR_A" "$BASE_URL/dashboard")
+[ "$code" = "307" ] || fail "a customer's dashboard should redirect to the portal (307), got $code"
+dash_headers=$(curl -s -o /dev/null -D - -b "$JAR_A" "$BASE_URL/dashboard")
+echo "$dash_headers" | tr -d '\r' | grep -qi '^location: .*/support$' || fail "customer dashboard should redirect to /support: $dash_headers"
+pass "a customer landing on the dashboard is sent to the portal"
+
+empty=$(curl -fsS -b "$JAR_A" "$BASE_URL/support") || fail "support page did not render"
+echo "$empty" | grep -q 'Explore breakthruventures.ai' || fail "support page is missing the shared footer"
+echo "$empty" | grep -q 'You have no tickets yet' || fail "empty support list missing its empty state"
+echo "$empty" | grep -q 'Open a ticket' || fail "support page missing the open action"
+new_page=$(curl -fsS -b "$JAR_A" "$BASE_URL/support/new") || fail "new ticket page did not render"
+echo "$new_page" | grep -q 'Describe the problem' || fail "new ticket form missing its label"
+echo "$new_page" | grep -q 'name="subject"' || fail "new ticket form missing the subject field"
+inbox_empty=$(curl -fsS -b "$JAR_A" "$BASE_URL/inbox") || fail "inbox page did not render"
+echo "$inbox_empty" | grep -q 'No notifications yet' || fail "empty inbox missing its empty state"
+pass "portal and inbox render for a customer"
+
 # Sign-up can't choose a role: a customer is refused the agent endpoints.
 code=$(status -b "$JAR_A" "$BASE_URL/api/admin/stats")
 [ "$code" = "403" ] || fail "a customer reading admin stats should be 403, got $code"
@@ -58,7 +80,7 @@ code=$(status "$BASE_URL/api/tickets")
 [ "$code" = "401" ] || fail "anonymous list should be 401, got $code"
 pass "anonymous access refused"
 
-new_ticket='{"subject":"smoke: cannot log in","body":"The page says invalid password."}'
+new_ticket='{"subject":"smoke: cannot log in","body":"The page says invalid password.\nplain-text-canary <b>not-html</b>"}'
 code=$(status -b "$JAR_A" -H 'content-type: application/json' -H 'origin: https://evil.example' -d "$new_ticket" "$BASE_URL/api/tickets")
 [ "$code" = "403" ] || fail "cross-origin create should be 403, got $code"
 code=$(status -b "$JAR_A" -H 'content-type: application/json' -d "$new_ticket" "$BASE_URL/api/tickets")
@@ -79,8 +101,26 @@ TID=$(echo "$created" | jget 'j.ticket.id')
 echo "$created" | grep -Eq 'assignee|triage|dueAt|version' && fail "a customer's ticket response must not carry staff fields: $created"
 pass "customer A opened a ticket"
 
+portal=$(curl -fsS -b "$JAR_A" "$BASE_URL/support") || fail "support list did not render"
+echo "$portal" | grep -q 'cannot log in' || fail "support list missing the ticket"
+echo "$portal" | grep -F -q 'Inbox, 1 unread' || fail "header missing the unread badge"
+thread=$(curl -fsS -b "$JAR_A" "$BASE_URL/support/$TID") || fail "ticket page did not render"
+echo "$thread" | grep -q 'invalid password' || fail "ticket page missing the message"
+echo "$thread" | grep -q 'Send reply' || fail "ticket page missing the reply form"
+echo "$thread" | grep -q 'Mark resolved' || fail "ticket page missing resolve"
+echo "$thread" | grep -F -q 'plain-text-canary &lt;b&gt;not-html&lt;/b&gt;' || fail "ticket message was not rendered as plain text"
+echo "$thread" | grep -F -q '<b>not-html</b>' && fail "ticket message was rendered as HTML"
+echo "$thread" | grep -Eq 'assignee|triage|firstResponseDueAt' && fail "ticket page shows staff fields"
+inbox_page=$(curl -fsS -b "$JAR_A" "$BASE_URL/inbox") || fail "inbox page did not render"
+echo "$inbox_page" | grep -q 'We received your ticket' || fail "inbox page missing the notification"
+echo "$inbox_page" | grep -q 'Mark read' || fail "inbox page missing mark read"
+echo "$inbox_page" | grep -F -q '<b>not-html</b>' && fail "inbox rendered the message as HTML"
+pass "portal lists the ticket, the thread is plain text, and the inbox shows it"
+
 code=$(status -b "$JAR_B" "$BASE_URL/api/tickets/$TID")
 [ "$code" = "404" ] || fail "customer B reading A's ticket should be 404, got $code"
+code=$(status -b "$JAR_B" "$BASE_URL/support/$TID")
+[ "$code" = "404" ] || fail "customer B opening A's ticket page should be 404, got $code"
 code=$(status -X POST -b "$JAR_B" -H 'content-type: application/json' -H "origin: $BASE_URL" -d '{"body":"hi"}' "$BASE_URL/api/tickets/$TID/messages")
 [ "$code" = "404" ] || fail "customer B replying on A's ticket should be 404, got $code"
 code=$(status -X PATCH -b "$JAR_B" -H 'content-type: application/json' -H "origin: $BASE_URL" -d '{"action":"resolve"}' "$BASE_URL/api/tickets/$TID")
@@ -111,6 +151,23 @@ code=$(status -X POST -b "$JAR_A" -H 'content-type: application/json' -H "origin
 [ "$code" = "403" ] || fail "a customer writing a KB article should be 403, got $code"
 pass "public KB search works; customers can't read drafts or write articles"
 
+# Knowledge base, public pages: signed-out visitors see the list and an article as plain text; unknown slugs are 404.
+kb_list=$(curl -fsS "$BASE_URL/kb") || fail "/kb did not render for a signed-out visitor"
+echo "$kb_list" | grep -q 'Explore breakthruventures.ai' || fail "/kb is missing the shared footer"
+echo "$kb_list" | grep -q 'aria-label="Search help articles"' || fail "/kb is missing its search form"
+echo "$kb_list" | grep -q 'href="/kb/' || fail "/kb should list published articles"
+kb_found=$(curl -fsS "$BASE_URL/kb?q=charged+twice+duplicate") || fail "/kb search did not render"
+echo "$kb_found" | grep -q 'href="/kb/billing-duplicate-charges"' || fail "/kb search should find the duplicate-charges article"
+[ "$(status "$BASE_URL/kb?q=%00")" = "200" ] || fail "/kb?q=%00 should be 200, not an error"
+[ "$(status "$BASE_URL/kb?q=%22&offset=abc")" = "200" ] || fail "odd /kb query should still render"
+kb_page=$(curl -fsS "$BASE_URL/kb/billing-duplicate-charges") || fail "/kb/[slug] did not render a published article"
+echo "$kb_page" | grep -q '<strong>A pending authorization.</strong>' || fail "article Markdown (bold, lists) was not rendered"
+echo "$kb_page" | grep -F -q '**' && fail "article page shows raw Markdown markers"
+echo "$kb_page" | grep -q 'Open a ticket' || fail "article page missing the open-a-ticket link"
+[ "$(status "$BASE_URL/kb/no-such-article-$RUN_ID")" = "404" ] || fail "an unknown article slug should be 404"
+[ "$(status "$BASE_URL/kb/Not_A_Slug")" = "404" ] || fail "a malformed article slug should be 404"
+pass "public /kb lists and searches published articles and /kb/[slug] shows one (unknown is 404)"
+
 if [ -n "${SMOKE_AGENT_EMAIL:-}" ] && [ -n "${SMOKE_AGENT_PASSWORD:-}" ]; then
   curl -fsS -c "$JAR_G" -b "$JAR_G" -H 'content-type: application/json' -H "origin: $BASE_URL" \
     -d "{\"email\":\"$SMOKE_AGENT_EMAIL\",\"password\":\"$SMOKE_AGENT_PASSWORD\"}" \
@@ -140,7 +197,15 @@ if [ -n "${SMOKE_AGENT_EMAIL:-}" ] && [ -n "${SMOKE_AGENT_PASSWORD:-}" ]; then
   echo "$a_inbox" | grep -q "$NOTE" && fail "customer A's inbox contains the internal note"
   a_list=$(curl -fsS -b "$JAR_A" "$BASE_URL/api/tickets")
   echo "$a_list" | grep -q "$NOTE" && fail "customer A's list contains the internal note"
-  pass "customer A sees the reply, never the note; the inbox message has no note text"
+  thread=$(curl -fsS -b "$JAR_A" "$BASE_URL/support/$TID")
+  echo "$thread" | grep -q 'looking into your login problem' || fail "portal should show the public reply"
+  echo "$thread" | grep -q "$NOTE" && fail "portal shows the internal note"
+  inbox_page=$(curl -fsS -b "$JAR_A" "$BASE_URL/inbox")
+  echo "$inbox_page" | grep -q 'looking into your login problem' || fail "inbox page should show the reply"
+  echo "$inbox_page" | grep -q "$NOTE" && fail "inbox page contains the internal note"
+  code=$(status -b "$JAR_G" "$BASE_URL/support")
+  [ "$code" = "307" ] || fail "an agent opening the customer portal should be redirected, got $code"
+  pass "customer A sees the reply, never the note, on the ticket page and in the inbox"
 
   agent_view=$(curl -fsS -b "$JAR_G" "$BASE_URL/api/tickets/$TID")
   [ -n "$(echo "$agent_view" | jget 'j.ticket.firstRespondedAt')" ] || fail "first response was not stamped: $agent_view"
@@ -168,11 +233,19 @@ if [ -n "${SMOKE_AGENT_EMAIL:-}" ] && [ -n "${SMOKE_AGENT_PASSWORD:-}" ]; then
   [ "$(curl -fsS "$BASE_URL/api/kb?q=$KB_WORD" | jget 'j.articles.length')" = "0" ] || fail "a draft appeared in public search"
   [ "$(curl -fsS -b "$JAR_G" "$BASE_URL/api/kb?q=$KB_WORD" | jget 'j.articles.length')" = "0" ] || fail "a draft appeared in public search for an agent"
   [ "$(curl -fsS -b "$JAR_G" "$BASE_URL/api/kb/articles?status=draft&q=$KB_WORD" | jget 'j.articles.length')" = "1" ] || fail "agent list should show the draft"
+  KB_SLUG=$(echo "$draft" | jget 'j.article.slug')
+  [ "$(status "$BASE_URL/kb/$KB_SLUG")" = "404" ] || fail "a draft's /kb page should be 404 for the public"
+  [ "$(status -b "$JAR_G" "$BASE_URL/kb/$KB_SLUG")" = "404" ] || fail "a draft's /kb page should be 404 even for an agent"
+  curl -fsS "$BASE_URL/kb?q=$KB_WORD" | grep -q "/kb/$KB_SLUG" && fail "a draft is listed on /kb"
   curl -fsS -X PATCH -b "$JAR_G" -H 'content-type: application/json' -H "origin: $BASE_URL" -d '{"status":"published"}' "$BASE_URL/api/kb/articles/$KB_ID" >/dev/null || fail "agent could not publish"
   [ "$(curl -fsS "$BASE_URL/api/kb?q=$KB_WORD" | jget 'j.articles[0].title')" = "$KB_WORD draft article" ] || fail "the published article should be in public search"
+  kb_art=$(curl -fsS "$BASE_URL/kb/$KB_SLUG") || fail "the published article's /kb page should render"
+  echo "$kb_art" | grep -q "Steps about $KB_WORD" || fail "the published article page is missing its body"
+  curl -fsS "$BASE_URL/kb?q=$KB_WORD" | grep -q "href=\"/kb/$KB_SLUG\"" || fail "the published article should be listed on /kb"
   code=$(status -X DELETE -b "$JAR_G" -H "origin: $BASE_URL" "$BASE_URL/api/kb/articles/$KB_ID")
   [ "$code" = "204" ] || fail "agent delete should be 204, got $code"
   [ "$(curl -fsS "$BASE_URL/api/kb?q=$KB_WORD" | jget 'j.articles.length')" = "0" ] || fail "a deleted article is still searchable"
+  [ "$(status "$BASE_URL/kb/$KB_SLUG")" = "404" ] || fail "a deleted article's /kb page should be 404"
   pass "agent drafted, published and deleted an article; the draft never showed in public search"
 else
   echo "skip - agent checks (set SMOKE_AGENT_EMAIL and SMOKE_AGENT_PASSWORD)"
@@ -180,6 +253,10 @@ fi
 
 code=$(status -X PATCH -b "$JAR_A" -H 'content-type: application/json' -H "origin: $BASE_URL" -d '{"action":"resolve"}' "$BASE_URL/api/tickets/$TID")
 [ "$code" = "200" ] || fail "owner resolve should be 200, got $code"
+resolved_page=$(curl -fsS -b "$JAR_A" "$BASE_URL/support/$TID") || fail "resolved ticket page did not render"
+echo "$resolved_page" | grep -q 'Resolved' || fail "resolved ticket page should show Resolved"
+echo "$resolved_page" | grep -q 'Mark resolved' && fail "a resolved ticket should not offer Mark resolved"
+echo "$resolved_page" | grep -q 'Send reply' || fail "a recently resolved ticket should still accept a reply"
 pass "customer A marked their ticket resolved"
 
 echo "SMOKE PASS"

@@ -1,5 +1,6 @@
 import "server-only";
 import { type SQL, and, count, desc, eq, sql } from "drizzle-orm";
+import { cache } from "react";
 import { z } from "zod";
 import { assertAgent } from "@/lib/access";
 import type { Actor } from "@/lib/auth/rbac";
@@ -168,8 +169,8 @@ export async function searchPublished(input: unknown = {}): Promise<{ articles: 
   };
 }
 
-/** One published article by slug, for `/kb/[slug]`. A draft or an unknown slug is a 404. */
-export async function getPublished(slug: string): Promise<PublicArticle> {
+/** One published article by slug, for `/kb/[slug]`. A draft or an unknown slug is a 404. Cached per request so `generateMetadata` and the page share one query. */
+export const getPublished = cache(async (slug: string): Promise<PublicArticle> => {
   const parsed = slugSchema.safeParse(slug);
   if (!parsed.success) throw new NotFoundError();
   const [row] = await db()
@@ -178,7 +179,7 @@ export async function getPublished(slug: string): Promise<PublicArticle> {
     .where(and(eq(kbArticle.slug, parsed.data), eq(kbArticle.status, "published")));
   if (!row) throw new NotFoundError();
   return row;
-}
+});
 
 // ---------------------------------------------------------------------------
 // Agent reads

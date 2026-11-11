@@ -3,23 +3,33 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-export function NavLinks({ links }: { links: { href: string; label: string }[] }) {
+export function NavLinks({ links }: { links: { href: string; label: string; badge?: number }[] }) {
   const pathname = usePathname();
   if (links.length === 0) return null;
   return (
-    <nav aria-label="Main" className="flex items-center gap-5">
+    <nav aria-label="Main" className="flex flex-wrap items-center gap-x-5">
       {links.map((l) => {
         const active = pathname === l.href || pathname.startsWith(`${l.href}/`);
+        const unread = l.badge !== undefined && l.badge > 0 ? l.badge : 0;
         return (
           <Link
             key={l.href}
             href={l.href}
             aria-current={active ? "page" : undefined}
-            className={`inline-flex min-h-11 items-center border-b-2 text-sm font-semibold ${
+            aria-label={unread > 0 ? `${l.label}, ${unread} unread` : undefined}
+            className={`inline-flex min-h-11 items-center gap-1.5 border-b-2 text-sm font-semibold ${
               active ? "border-accent text-accent" : "border-transparent text-foreground hover:text-accent"
             }`}
           >
-            {l.label}
+            <span>{l.label}</span>
+            {unread > 0 && (
+              <span
+                aria-hidden
+                className="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-accent px-1 text-xs font-semibold text-accent-foreground"
+              >
+                {unread > 99 ? "99+" : unread}
+              </span>
+            )}
           </Link>
         );
       })}

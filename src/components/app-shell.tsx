@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import { NAV_LINKS, APP_TITLE, PARENT_SITE } from "@/lib/app-config";
 import { getCurrentUser, type CurrentUser } from "@/lib/auth/session";
 import { log } from "@/lib/log";
+import { unreadCount } from "@/lib/mail/inbox";
 import { NavLinks } from "./nav-links";
 import { SignOutButton } from "./sign-out-button";
 import { buttonOutlineAccent } from "./ui/styles";
@@ -19,6 +20,16 @@ async function currentUserOrNull(): Promise<CurrentUser | null> {
   }
 }
 
+/** The header badge. A failed count hides the badge; it must not take the page down. */
+async function unreadOrZero(user: CurrentUser): Promise<number> {
+  try {
+    return await unreadCount(user);
+  } catch (err) {
+    log.warn("app_shell_unread_failed", { error: err instanceof Error ? err.message : "unknown" });
+    return 0;
+  }
+}
+
 /**
  * The Breakthru header and footer around every page. Header: logo, divider, app name,
  * navigation, then sign-in or the user's name with sign out. Footer: one link, no logo.
@@ -28,7 +39,17 @@ export async function AppShell({ children, nav }: { children: ReactNode; nav?: R
   // Opt into per-request rendering before the try/catch below, so the catch never swallows the framework's dynamic signal.
   await connection();
   const user = await currentUserOrNull();
-  const links = NAV_LINKS.filter((l) => !l.adminOnly || user?.role === "admin");
+  const unread = user ? await unreadOrZero(user) : 0;
+  const links = NAV_LINKS.filter((l) => {
+    if (l.adminOnly && user?.role !== "admin") return false;
+    if (l.customerOnly && user?.role !== "user") return false;
+    if (l.signedIn && !user) return false;
+    return true;
+  }).map((l) => ({
+    href: l.href,
+    label: l.label,
+    badge: l.href === "/inbox" && unread > 0 ? unread : undefined,
+  }));
 
   return (
     <>
@@ -63,7 +84,7 @@ export async function AppShell({ children, nav }: { children: ReactNode; nav?: R
             <span className="truncate font-sans text-lg font-semibold tracking-tight sm:text-xl">{APP_TITLE}</span>
           </Link>
 
-          <div className="flex flex-1 items-center sm:ml-auto sm:flex-none">
+          <div className="flex min-w-0 flex-1 flex-wrap items-center sm:ml-auto sm:flex-none">
             {nav ?? <NavLinks links={links} />}
           </div>
 

@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { PageIntro, Panel, StatGrid, StatTile, buttonPrimary } from "@/components/ui";
+import { redirect } from "next/navigation";
+import { PageIntro, Panel, StatGrid, StatTile, buttonPrimary, buttonSecondary } from "@/components/ui";
 import { requireUserOrRedirect } from "@/lib/auth/session";
 import { listInbox } from "@/lib/mail/inbox";
 import { countOpenTickets } from "@/lib/tickets";
@@ -8,26 +9,45 @@ import { countOpenTickets } from "@/lib/tickets";
 export const metadata: Metadata = { title: "Dashboard" };
 export const dynamic = "force-dynamic";
 
-const ROLE_LABEL = { user: "Customer", agent: "Agent", admin: "Admin" } as const;
+const ROLE_LABEL = { agent: "Agent", admin: "Admin" } as const;
 
 /**
- * Where every signed-in user lands until the customer portal (/support) and agent desk (/desk) arrive with issues
- * 11.4 and 11.5; those pages will take this route over with a redirect. Counts come from the same data functions
- * as the API, so what a role sees here is what its access rules allow.
+ * Agents land here until the desk (/desk) arrives with issue 11.5. Customers are sent to the portal.
+ * Counts come from the same data functions as the API, so what a role sees here is what its access rules allow.
  */
 export default async function DashboardPage() {
   const user = await requireUserOrRedirect();
+  if (user.role === "user") redirect("/support");
   const inbox = await listInbox(user);
-  const open = user.role === "admin" ? null : await countOpenTickets(user);
+  const open = user.role === "agent" ? await countOpenTickets(user) : null;
 
   return (
     <>
-      <PageIntro section={ROLE_LABEL[user.role]} title={`Welcome, ${user.name}`} description="The ticket portal and agent desk pages are coming. The API is live." actions={user.role === "admin" ? <Link href="/admin" className={buttonPrimary}>Admin</Link> : undefined} />
+      <PageIntro
+        section={ROLE_LABEL[user.role]}
+        title={`Welcome, ${user.name}`}
+        description={user.role === "admin" ? "Counts and accounts live on the admin page." : "The agent desk is coming. Notifications for your tickets are below."}
+        actions={
+          user.role === "admin" ? (
+            <Link href="/admin" className={buttonPrimary}>
+              Admin
+            </Link>
+          ) : undefined
+        }
+      />
       <StatGrid>
-        {open !== null && <StatTile value={open} label={user.role === "agent" ? "Open tickets in the queue" : "Your open tickets"} tone="accent" />}
+        {open !== null && <StatTile value={open} label="Open tickets in the queue" tone="accent" />}
         <StatTile value={inbox.unread} label="Unread notifications" />
       </StatGrid>
-      <Panel title="Notifications" count={inbox.messages.length}>
+      <Panel
+        title="Notifications"
+        count={inbox.messages.length}
+        action={
+          <Link href="/inbox" className={buttonSecondary}>
+            Inbox
+          </Link>
+        }
+      >
         {inbox.messages.length === 0 ? (
           <p className="text-muted">Nothing yet.</p>
         ) : (

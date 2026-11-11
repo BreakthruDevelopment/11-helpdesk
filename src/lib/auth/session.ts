@@ -35,12 +35,13 @@ export async function requireRoleOrRedirect(role: Role): Promise<CurrentUser> {
 }
 
 /**
- * Where each role lands after sign-in and when it asks for a page that isn't its own. Every role goes to /dashboard
- * until the customer portal (/support) and the agent desk (/desk) exist (issues 11.4 and 11.5); /dashboard will then
- * redirect there. Admins keep /admin.
+ * Where each role lands after sign-in and when it asks for a page that isn't its own.
+ * Customers go to the portal. Agents stay on /dashboard until the desk exists (issue 11.5). Admins keep /admin.
  */
 export function homeFor(role: Role): string {
-  return role === "admin" ? "/admin" : "/dashboard";
+  if (role === "admin") return "/admin";
+  if (role === "user") return "/support";
+  return "/dashboard";
 }
 
 /** For route handlers and server actions: throw, so the caller maps it to 401/403. */

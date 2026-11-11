@@ -39,8 +39,12 @@ const slugSchema = z
   .max(KB_LIMITS.slugMax)
   .regex(/^[a-z0-9]+(-[a-z0-9]+)*$/, "Use lowercase letters, numbers and single hyphens");
 
-const titleSchema = z.string().trim().min(1, "Title is required").max(KB_LIMITS.titleMax);
-const bodySchema = z.string().trim().min(1, "Body is required").max(KB_LIMITS.bodyMax);
+// Postgres text can't hold NUL (22021); refuse it at the boundary instead of failing with a 500.
+const noNul = (s: string) => !s.includes("\0");
+const NUL_MESSAGE = "Contains an invalid character";
+
+const titleSchema = z.string().trim().min(1, "Title is required").max(KB_LIMITS.titleMax).refine(noNul, NUL_MESSAGE);
+const bodySchema = z.string().trim().min(1, "Body is required").max(KB_LIMITS.bodyMax).refine(noNul, NUL_MESSAGE);
 
 /** `slug` is optional: when absent it is derived from the title and made unique. Once set it never changes. */
 export const createArticleInput = z
@@ -52,7 +56,7 @@ export const updateArticleInput = z
   .strict()
   .refine((v) => v.title !== undefined || v.body !== undefined || v.status !== undefined, { message: "Nothing to change" });
 
-const queryText = z.string().trim().max(KB_LIMITS.queryMax);
+const queryText = z.string().trim().max(KB_LIMITS.queryMax).refine(noNul, NUL_MESSAGE);
 
 export const publicSearchQuery = z.object({
   q: queryText.default(""),

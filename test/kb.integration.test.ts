@@ -172,6 +172,9 @@ describe.skipIf(!url)("knowledge base (Postgres)", () => {
       expect((await PUB.GET(req(`/api/kb?q=${"x".repeat(201)}`))).status).toBe(400);
       expect((await PUB.GET(req("/api/kb?limit=1000"))).status).toBe(400);
       expect((await PUB.GET(req("/api/kb?limit=0"))).status).toBe(400);
+      // NUL can't be stored or searched in Postgres text; it is a 400, never a 500.
+      expect((await PUB.GET(req("/api/kb?q=%00"))).status).toBe(400);
+      expect((await PUB.GET(req("/api/kb?q=a%00b"))).status).toBe(400);
     });
 
     it("pages with limit and offset", async () => {

@@ -14,6 +14,7 @@ export const PARENT_SITE = { href: "https://breakthruventures.ai", label: "Explo
  * `customerOnly` is the portal. The agent desk link arrives with issue 11.5.
  */
 export const NAV_LINKS: { href: string; label: string; adminOnly?: boolean; customerOnly?: boolean; signedIn?: boolean }[] = [
+  { href: "/kb", label: "Help" },
   { href: "/support", label: "Support", customerOnly: true },
   { href: "/inbox", label: "Inbox", signedIn: true },
   { href: "/admin", label: "Admin", adminOnly: true },

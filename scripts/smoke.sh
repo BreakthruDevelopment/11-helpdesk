@@ -150,6 +150,20 @@ code=$(status -X POST -b "$JAR_A" -H 'content-type: application/json' -H "origin
 [ "$code" = "403" ] || fail "a customer writing a KB article should be 403, got $code"
 pass "public KB search works; customers can't read drafts or write articles"
 
+# Knowledge base, public pages: signed-out visitors see the list and an article as plain text; unknown slugs are 404.
+kb_list=$(curl -fsS "$BASE_URL/kb") || fail "/kb did not render for a signed-out visitor"
+echo "$kb_list" | grep -q 'Explore breakthruventures.ai' || fail "/kb is missing the shared footer"
+echo "$kb_list" | grep -q 'aria-label="Search help articles"' || fail "/kb is missing its search form"
+echo "$kb_list" | grep -q 'href="/kb/' || fail "/kb should list published articles"
+kb_found=$(curl -fsS "$BASE_URL/kb?q=charged+twice+duplicate") || fail "/kb search did not render"
+echo "$kb_found" | grep -q 'href="/kb/billing-duplicate-charges"' || fail "/kb search should find the duplicate-charges article"
+[ "$(status "$BASE_URL/kb?q=%22&offset=abc")" = "200" ] || fail "odd /kb query should still render"
+kb_page=$(curl -fsS "$BASE_URL/kb/billing-duplicate-charges") || fail "/kb/[slug] did not render a published article"
+echo "$kb_page" | grep -q 'Open a ticket' || fail "article page missing the open-a-ticket link"
+[ "$(status "$BASE_URL/kb/no-such-article-$RUN_ID")" = "404" ] || fail "an unknown article slug should be 404"
+[ "$(status "$BASE_URL/kb/Not_A_Slug")" = "404" ] || fail "a malformed article slug should be 404"
+pass "public /kb lists and searches published articles and /kb/[slug] shows one (unknown is 404)"
+
 if [ -n "${SMOKE_AGENT_EMAIL:-}" ] && [ -n "${SMOKE_AGENT_PASSWORD:-}" ]; then
   curl -fsS -c "$JAR_G" -b "$JAR_G" -H 'content-type: application/json' -H "origin: $BASE_URL" \
     -d "{\"email\":\"$SMOKE_AGENT_EMAIL\",\"password\":\"$SMOKE_AGENT_PASSWORD\"}" \
@@ -215,11 +229,19 @@ if [ -n "${SMOKE_AGENT_EMAIL:-}" ] && [ -n "${SMOKE_AGENT_PASSWORD:-}" ]; then
   [ "$(curl -fsS "$BASE_URL/api/kb?q=$KB_WORD" | jget 'j.articles.length')" = "0" ] || fail "a draft appeared in public search"
   [ "$(curl -fsS -b "$JAR_G" "$BASE_URL/api/kb?q=$KB_WORD" | jget 'j.articles.length')" = "0" ] || fail "a draft appeared in public search for an agent"
   [ "$(curl -fsS -b "$JAR_G" "$BASE_URL/api/kb/articles?status=draft&q=$KB_WORD" | jget 'j.articles.length')" = "1" ] || fail "agent list should show the draft"
+  KB_SLUG=$(echo "$draft" | jget 'j.article.slug')
+  [ "$(status "$BASE_URL/kb/$KB_SLUG")" = "404" ] || fail "a draft's /kb page should be 404 for the public"
+  [ "$(status -b "$JAR_G" "$BASE_URL/kb/$KB_SLUG")" = "404" ] || fail "a draft's /kb page should be 404 even for an agent"
+  curl -fsS "$BASE_URL/kb?q=$KB_WORD" | grep -q "/kb/$KB_SLUG" && fail "a draft is listed on /kb"
   curl -fsS -X PATCH -b "$JAR_G" -H 'content-type: application/json' -H "origin: $BASE_URL" -d '{"status":"published"}' "$BASE_URL/api/kb/articles/$KB_ID" >/dev/null || fail "agent could not publish"
   [ "$(curl -fsS "$BASE_URL/api/kb?q=$KB_WORD" | jget 'j.articles[0].title')" = "$KB_WORD draft article" ] || fail "the published article should be in public search"
+  kb_art=$(curl -fsS "$BASE_URL/kb/$KB_SLUG") || fail "the published article's /kb page should render"
+  echo "$kb_art" | grep -q "Steps about $KB_WORD" || fail "the published article page is missing its body"
+  curl -fsS "$BASE_URL/kb?q=$KB_WORD" | grep -q "href=\"/kb/$KB_SLUG\"" || fail "the published article should be listed on /kb"
   code=$(status -X DELETE -b "$JAR_G" -H "origin: $BASE_URL" "$BASE_URL/api/kb/articles/$KB_ID")
   [ "$code" = "204" ] || fail "agent delete should be 204, got $code"
   [ "$(curl -fsS "$BASE_URL/api/kb?q=$KB_WORD" | jget 'j.articles.length')" = "0" ] || fail "a deleted article is still searchable"
+  [ "$(status "$BASE_URL/kb/$KB_SLUG")" = "404" ] || fail "a deleted article's /kb page should be 404"
   pass "agent drafted, published and deleted an article; the draft never showed in public search"
 else
   echo "skip - agent checks (set SMOKE_AGENT_EMAIL and SMOKE_AGENT_PASSWORD)"

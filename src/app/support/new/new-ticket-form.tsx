@@ -1,8 +1,9 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useState } from "react";
 import { buttonPrimary, inputClass, labelClass, textareaClass } from "@/components/ui/styles";
 import type { FormState } from "@/lib/form-error";
+import { KbSuggestions } from "./kb-suggestions";
 
 export function NewTicketForm({
   action,
@@ -16,6 +17,7 @@ export function NewTicketForm({
   bodyMax: number;
 }) {
   const [state, formAction, pending] = useActionState(action, { error: null });
+  const [subject, setSubject] = useState(defaultSubject);
   return (
     <form action={formAction} className="space-y-4">
       <label className={labelClass}>
@@ -24,12 +26,14 @@ export function NewTicketForm({
           name="subject"
           required
           maxLength={subjectMax}
-          defaultValue={defaultSubject}
+          value={subject}
+          onChange={(e) => setSubject(e.target.value)}
           disabled={pending}
           autoComplete="off"
           className={inputClass}
         />
       </label>
+      <KbSuggestions subject={subject} />
       <label className={labelClass}>
         <span>Describe the problem</span>
         <textarea name="body" required maxLength={bodyMax} rows={6} disabled={pending} className={textareaClass} />

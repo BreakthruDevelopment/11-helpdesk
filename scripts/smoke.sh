@@ -4,7 +4,9 @@
 # refused without our Origin. Agent side (only when SMOKE_AGENT_EMAIL and SMOKE_AGENT_PASSWORD are set; CI seeds an
 # agent with `pnpm db:seed`, the live smoke covers the customer side only): internal note plus public reply, A sees
 # the reply and not the note, the inbox message has no note text, first response stamped, pending_customer pauses
-# the clock and A's reply resumes it, due times are set. KB search and the AI triage checks arrive with 11.2 and 11.3.
+# the clock and A's reply resumes it, due times and the SLA state are set, the agent queue is ordered, and the agent
+# writes knowledge-base articles (a draft stays out of public search until published). Always: public KB search
+# finds a seeded article, and customers can't write articles. The AI triage checks arrive with 11.3.
 #   BASE_URL=https://app11.breakthruventures.ai ./scripts/smoke.sh
 set -euo pipefail
 
@@ -95,6 +97,20 @@ code=$(status -X POST -b "$JAR_A" -H 'content-type: application/json' -H "origin
 [ "$code" = "403" ] || fail "a customer writing an internal note should be 403, got $code"
 pass "customers can't write internal notes"
 
+# Knowledge base, public side: needs no sign-in, finds a seeded article, never errors on odd input; customers can't write.
+kb=$(curl -fsS "$BASE_URL/api/kb?q=charged+twice+duplicate") || fail "public KB search failed"
+[ "$(echo "$kb" | jget 'j.articles[0].slug')" = "billing-duplicate-charges" ] || fail "KB search should find the duplicate-charges article first: $kb"
+echo "$kb" | grep -q '"authorId"\|"status"\|"body"' && fail "public KB results carry non-public fields: $kb"
+[ "$(status "$BASE_URL/api/kb?q=%22")" = "200" ] || fail "odd KB query should still be 200"
+[ "$(status "$BASE_URL/api/kb?limit=1000")" = "400" ] || fail "KB limit over the cap should be 400"
+code=$(status "$BASE_URL/api/kb/articles")
+[ "$code" = "401" ] || fail "anonymous KB article list should be 401, got $code"
+code=$(status -b "$JAR_A" "$BASE_URL/api/kb/articles")
+[ "$code" = "403" ] || fail "a customer listing KB articles (drafts) should be 403, got $code"
+code=$(status -X POST -b "$JAR_A" -H 'content-type: application/json' -H "origin: $BASE_URL" -d '{"title":"x","body":"y"}' "$BASE_URL/api/kb/articles")
+[ "$code" = "403" ] || fail "a customer writing a KB article should be 403, got $code"
+pass "public KB search works; customers can't read drafts or write articles"
+
 if [ -n "${SMOKE_AGENT_EMAIL:-}" ] && [ -n "${SMOKE_AGENT_PASSWORD:-}" ]; then
   curl -fsS -c "$JAR_G" -b "$JAR_G" -H 'content-type: application/json' -H "origin: $BASE_URL" \
     -d "{\"email\":\"$SMOKE_AGENT_EMAIL\",\"password\":\"$SMOKE_AGENT_PASSWORD\"}" \
@@ -103,7 +119,12 @@ if [ -n "${SMOKE_AGENT_EMAIL:-}" ] && [ -n "${SMOKE_AGENT_PASSWORD:-}" ]; then
   agent_view=$(curl -fsS -b "$JAR_G" "$BASE_URL/api/tickets/$TID") || fail "agent could not read the ticket"
   [ -n "$(echo "$agent_view" | jget 'j.ticket.firstResponseDueAt')" ] || fail "first response due time not set: $agent_view"
   [ -n "$(echo "$agent_view" | jget 'j.ticket.resolutionDueAt')" ] || fail "resolution due time not set: $agent_view"
-  pass "agent sees the ticket with SLA due times set"
+  [ "$(echo "$agent_view" | jget 'j.ticket.sla.state')" = "ok" ] || fail "a fresh ticket's SLA state should be ok: $agent_view"
+  queue=$(curl -fsS -b "$JAR_G" "$BASE_URL/api/tickets?view=unassigned&limit=100") || fail "agent could not load the queue"
+  echo "$queue" | grep -q "$TID" || fail "the new ticket is missing from the unassigned queue"
+  ordered='(()=>{const d=j.tickets.map(t=>t.sla.nextDueAt);const n=d.findIndex(x=>x===null);const live=n<0?d:d.slice(0,n);return live.every((x,i)=>i===0||live[i-1]<=x)&&(n<0||d.slice(n).every(x=>x===null))})()'
+  [ "$(echo "$queue" | jget "$ordered")" = "true" ] || fail "the queue is not ordered by due time (running clocks first, soonest first)"
+  pass "agent sees the ticket with SLA due times and state set, in a queue ordered by due time"
 
   code=$(status -X POST -b "$JAR_G" -H 'content-type: application/json' -H "origin: $BASE_URL" -d "{\"body\":\"$NOTE\",\"visibility\":\"internal\"}" "$BASE_URL/api/tickets/$TID/messages")
   [ "$code" = "201" ] || fail "agent internal note should be 201, got $code"
@@ -137,6 +158,22 @@ if [ -n "${SMOKE_AGENT_EMAIL:-}" ] && [ -n "${SMOKE_AGENT_PASSWORD:-}" ]; then
   [ -z "$(echo "$resumed" | jget 'j.ticket.pausedAt')" ] || fail "the customer's reply should resume the clock: $resumed"
   [ "$(echo "$resumed" | jget 'j.ticket.status')" = "open" ] || fail "the customer's reply should reopen the work: $resumed"
   pass "pending_customer paused the clock, a stale version was refused, the customer's reply resumed it"
+
+  # Knowledge base, agent side: a draft is invisible to the public until published.
+  KB_WORD="smokekb${RUN_ID}"
+  draft=$(curl -fsS -X POST -b "$JAR_G" -H 'content-type: application/json' -H "origin: $BASE_URL" \
+    -d "{\"title\":\"$KB_WORD draft article\",\"body\":\"Steps about $KB_WORD.\"}" "$BASE_URL/api/kb/articles") || fail "agent could not create a draft article"
+  KB_ID=$(echo "$draft" | jget 'j.article.id')
+  [ "$(echo "$draft" | jget 'j.article.status')" = "draft" ] || fail "a new article should be a draft: $draft"
+  [ "$(curl -fsS "$BASE_URL/api/kb?q=$KB_WORD" | jget 'j.articles.length')" = "0" ] || fail "a draft appeared in public search"
+  [ "$(curl -fsS -b "$JAR_G" "$BASE_URL/api/kb?q=$KB_WORD" | jget 'j.articles.length')" = "0" ] || fail "a draft appeared in public search for an agent"
+  [ "$(curl -fsS -b "$JAR_G" "$BASE_URL/api/kb/articles?status=draft&q=$KB_WORD" | jget 'j.articles.length')" = "1" ] || fail "agent list should show the draft"
+  curl -fsS -X PATCH -b "$JAR_G" -H 'content-type: application/json' -H "origin: $BASE_URL" -d '{"status":"published"}' "$BASE_URL/api/kb/articles/$KB_ID" >/dev/null || fail "agent could not publish"
+  [ "$(curl -fsS "$BASE_URL/api/kb?q=$KB_WORD" | jget 'j.articles[0].title')" = "$KB_WORD draft article" ] || fail "the published article should be in public search"
+  code=$(status -X DELETE -b "$JAR_G" -H "origin: $BASE_URL" "$BASE_URL/api/kb/articles/$KB_ID")
+  [ "$code" = "204" ] || fail "agent delete should be 204, got $code"
+  [ "$(curl -fsS "$BASE_URL/api/kb?q=$KB_WORD" | jget 'j.articles.length')" = "0" ] || fail "a deleted article is still searchable"
+  pass "agent drafted, published and deleted an article; the draft never showed in public search"
 else
   echo "skip - agent checks (set SMOKE_AGENT_EMAIL and SMOKE_AGENT_PASSWORD)"
 fi

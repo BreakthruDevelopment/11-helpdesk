@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { KbBody } from "@/components/kb-body";
 import { formatWhen } from "@/components/format-when";
 import { PageIntro, Panel, buttonPrimary, buttonSecondary } from "@/components/ui";
 import { NotFoundError } from "@/lib/errors";
@@ -42,8 +43,8 @@ export default async function KbArticlePage({ params }: { params: Promise<{ slug
         }
       />
       <Panel title="Article">
-        {/* Plain text only. React escapes the body; line breaks are kept by CSS. Do not render it as HTML. */}
-        <p className="break-words whitespace-pre-wrap">{article.body}</p>
+        {/* Markdown subset built as React elements (escaped); never HTML strings. */}
+        <KbBody body={article.body} />
       </Panel>
       <Panel title="Still stuck?">
         <p className="mb-4 text-muted">Open a ticket and we&apos;ll help.</p>

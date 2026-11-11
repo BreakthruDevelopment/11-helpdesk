@@ -1,8 +1,10 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { ZodError } from "zod";
 import { formatWhen } from "@/components/format-when";
 import { FilterBar, PageIntro, Panel, buttonSecondary } from "@/components/ui";
 import { searchPublished } from "@/lib/kb";
+import { stripMarkdown } from "@/lib/kb-markdown";
 
 export const metadata: Metadata = { title: "Help articles" };
 export const dynamic = "force-dynamic";
@@ -13,10 +15,14 @@ type Search = { q?: string; offset?: string };
 
 export default async function KbPage({ searchParams }: { searchParams: Promise<Search> }) {
   const sp = await searchParams;
-  const q = typeof sp.q === "string" ? sp.q.trim().slice(0, 100) : "";
+  // Same limits as the API (200 chars, no NUL). Anything odd falls back to listing instead of a 500.
+  const q = typeof sp.q === "string" ? sp.q.replaceAll("\0", "").trim().slice(0, 200) : "";
   const parsed = Number(typeof sp.offset === "string" ? sp.offset : "0");
   const offset = Number.isInteger(parsed) && parsed >= 0 && parsed <= 10_000 ? parsed : 0;
-  const result = await searchPublished({ q, limit: PAGE_SIZE, offset });
+  const result = await searchPublished({ q, limit: PAGE_SIZE, offset }).catch((err: unknown) => {
+    if (err instanceof ZodError) return searchPublished({ limit: PAGE_SIZE, offset });
+    throw err;
+  });
 
   const href = (nextOffset: number) => {
     const params = new URLSearchParams();
@@ -49,8 +55,8 @@ export default async function KbPage({ searchParams }: { searchParams: Promise<S
                 <Link href={`/kb/${a.slug}`} className="font-semibold break-words text-accent hover:underline">
                   {a.title}
                 </Link>
-                {/* Plain text only. React escapes the excerpt; do not render it as HTML. */}
-                <p className="mt-1 break-words whitespace-pre-line text-muted">{a.excerpt}</p>
+                {/* Plain text only: Markdown markers are stripped and React escapes the rest. */}
+                <p className="mt-1 break-words text-muted">{stripMarkdown(a.excerpt)}</p>
                 <p className="mt-1 text-sm text-muted">
                   Updated <time dateTime={a.updatedAt.toISOString()}>{formatWhen(a.updatedAt)}</time>
                 </p>

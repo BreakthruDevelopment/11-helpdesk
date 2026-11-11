@@ -19,6 +19,9 @@ export default function Home() {
             <Link href="/support" className={buttonPrimary}>
               Support portal
             </Link>
+            <Link href="/kb" className={buttonOutlineAccent}>
+              Help articles
+            </Link>
             <Link href="/sign-in" className={buttonOutlineAccent}>
               Sign in
             </Link>

@@ -34,6 +34,7 @@ for path in / /sign-in; do
 done
 home=$(curl -fsS "$BASE_URL/") || fail "home did not render"
 echo "$home" | grep -q 'href="/support"' || fail "home should link to the support portal"
+echo "$home" | grep -q 'href="/kb"' || fail "home should link to the knowledge base"
 pass "pages render inside the shared shell"
 
 for path in /dashboard /admin /support /support/new /inbox; do
@@ -157,8 +158,11 @@ echo "$kb_list" | grep -q 'aria-label="Search help articles"' || fail "/kb is mi
 echo "$kb_list" | grep -q 'href="/kb/' || fail "/kb should list published articles"
 kb_found=$(curl -fsS "$BASE_URL/kb?q=charged+twice+duplicate") || fail "/kb search did not render"
 echo "$kb_found" | grep -q 'href="/kb/billing-duplicate-charges"' || fail "/kb search should find the duplicate-charges article"
+[ "$(status "$BASE_URL/kb?q=%00")" = "200" ] || fail "/kb?q=%00 should be 200, not an error"
 [ "$(status "$BASE_URL/kb?q=%22&offset=abc")" = "200" ] || fail "odd /kb query should still render"
 kb_page=$(curl -fsS "$BASE_URL/kb/billing-duplicate-charges") || fail "/kb/[slug] did not render a published article"
+echo "$kb_page" | grep -q '<strong>A pending authorization.</strong>' || fail "article Markdown (bold, lists) was not rendered"
+echo "$kb_page" | grep -F -q '**' && fail "article page shows raw Markdown markers"
 echo "$kb_page" | grep -q 'Open a ticket' || fail "article page missing the open-a-ticket link"
 [ "$(status "$BASE_URL/kb/no-such-article-$RUN_ID")" = "404" ] || fail "an unknown article slug should be 404"
 [ "$(status "$BASE_URL/kb/Not_A_Slug")" = "404" ] || fail "a malformed article slug should be 404"

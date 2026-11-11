@@ -12,7 +12,7 @@ const CODE = /^[a-z0-9_]{1,40}$/;
  *   requests (Oracle, Azure Container Apps).
  * - `inline`: no timer and `nudge()` does nothing; jobs run only inside `await kick({ budgetMs })`, within the request. For
  *   platforms that give no CPU after the response (AWS Lambda, Cloud Run with CPU allocated only during requests).
- *   Chosen by `JOBS_WORKER=inline`, and automatically when `AWS_LAMBDA_FUNCTION_NAME` is set.
+ *   Chosen by `JOBS_WORKER=inline`, and automatically when `AWS_LAMBDA_FUNCTION_NAME` (Lambda) or `K_SERVICE` (Cloud Run) is set.
  * - `off`: nothing runs (`JOBS_WORKER=off`: tests, scripts).
  */
 export type WorkerMode = "timer" | "inline" | "off";
@@ -20,7 +20,8 @@ export type WorkerMode = "timer" | "inline" | "off";
 export function workerMode(env: Record<string, string | undefined> = process.env): WorkerMode {
   const v = env.JOBS_WORKER;
   if (v === "off" || v === "inline" || v === "timer") return v;
-  return env.AWS_LAMBDA_FUNCTION_NAME ? "inline" : "timer";
+  // Cloud Run sets K_SERVICE; with CPU allocated only during requests it behaves like Lambda.
+  return env.AWS_LAMBDA_FUNCTION_NAME || env.K_SERVICE ? "inline" : "timer";
 }
 
 /** What a handler sees. The payload is yours; never log it. */

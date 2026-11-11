@@ -8,7 +8,10 @@
 # the reply and not the note on the ticket page and in the inbox, first response stamped, pending_customer pauses the
 # clock and A's reply resumes it, due times and the SLA state are set, the agent queue is ordered, and the agent
 # writes knowledge-base articles (a draft stays out of public search and its /kb page is 404 until published).
-# The AI triage checks arrive with 11.3.
+# AI (demo mode in CI): the new ticket was triaged at creation (never urgent; recorded demo triage is not applied), the agent can re-triage and
+# ask for a suggested reply, the draft is not sent (message count unchanged) and neither the draft nor the triage
+# reaches the customer. Always: customers can't trigger or read triage or suggested replies (403), nor can
+# anonymous callers (401).
 #   BASE_URL=https://app11.breakthruventures.ai ./scripts/smoke.sh
 set -euo pipefail
 
@@ -129,9 +132,19 @@ code=$(status -X POST -b "$JAR_B" -H 'content-type: application/json' -H "origin
 [ "$code" = "403" ] || fail "customer B on the triage route should be 403, got $code"
 code=$(status -X POST -b "$JAR_A" -H 'content-type: application/json' -H "origin: $BASE_URL" -d '{}' "$BASE_URL/api/tickets/$TID/triage")
 [ "$code" = "403" ] || fail "even the owner on the triage route should be 403, got $code"
+for route in triage suggest-reply; do
+  for jar in "$JAR_A" "$JAR_B"; do
+    code=$(status -X POST -b "$jar" -H 'content-type: application/json' -H "origin: $BASE_URL" -d '{}' "$BASE_URL/api/tickets/$TID/$route")
+    [ "$code" = "403" ] || fail "a customer on the $route route should be 403, got $code"
+    code=$(status -b "$jar" "$BASE_URL/api/tickets/$TID/$route")
+    [ "$code" = "403" ] || fail "a customer reading $route should be 403, got $code"
+  done
+  code=$(status -X POST -H 'content-type: application/json' -H "origin: $BASE_URL" -d '{}' "$BASE_URL/api/tickets/$TID/$route")
+  [ "$code" = "401" ] || fail "an anonymous call to the $route route should be 401, got $code"
+done
 b_list=$(curl -fsS -b "$JAR_B" "$BASE_URL/api/tickets")
 echo "$b_list" | grep -q "$TID" && fail "B's ticket list contains A's ticket"
-pass "customer B blocked from A's ticket (404) and from triage (403)"
+pass "customer B blocked from A's ticket (404); customers can't trigger or read triage or suggested replies (403), anonymous gets 401"
 
 code=$(status -X POST -b "$JAR_A" -H 'content-type: application/json' -H "origin: $BASE_URL" -d "{\"body\":\"$NOTE\",\"visibility\":\"internal\"}" "$BASE_URL/api/tickets/$TID/messages")
 [ "$code" = "403" ] || fail "a customer writing an internal note should be 403, got $code"
@@ -206,6 +219,30 @@ if [ -n "${SMOKE_AGENT_EMAIL:-}" ] && [ -n "${SMOKE_AGENT_PASSWORD:-}" ]; then
   code=$(status -b "$JAR_G" "$BASE_URL/support")
   [ "$code" = "307" ] || fail "an agent opening the customer portal should be redirected, got $code"
   pass "customer A sees the reply, never the note, on the ticket page and in the inbox"
+
+  # AI (demo mode in CI): triage ran when the ticket was created, and the agent can re-run it and ask for a draft.
+  # The draft is advice for the agent: nothing is sent, and neither it nor the triage is visible to the customer.
+  agent_view=$(curl -fsS -b "$JAR_G" "$BASE_URL/api/tickets/$TID")
+  # Live model: applied and marked set by AI. Demo mode: the recorded card is stored but category and priority are not applied.
+  [ "$(echo "$agent_view" | jget 'j.ticket.triageSource')" = "ai" ] || [ "$(echo "$agent_view" | jget 'j.ticket.triage.demo')" = "true" ] || fail "the new ticket should have been triaged at creation: $agent_view"
+  [ -n "$(echo "$agent_view" | jget 'j.ticket.triage.summary')" ] || fail "the triage has no summary: $agent_view"
+  [ "$(echo "$agent_view" | jget 'j.ticket.priority')" != "urgent" ] || fail "triage must never set urgent: $agent_view"
+  msgs_before=$(echo "$agent_view" | jget 'j.messages.length')
+  triaged=$(curl -fsS -X POST -b "$JAR_G" -H 'content-type: application/json' -H "origin: $BASE_URL" -d '{}' "$BASE_URL/api/tickets/$TID/triage") || fail "agent re-triage failed"
+  [ "$(echo "$triaged" | jget 'j.triage.retriagesLeft')" = "2" ] || fail "re-triage should leave 2 re-triages: $triaged"
+  [ "$(curl -fsS -b "$JAR_G" "$BASE_URL/api/tickets/$TID/suggest-reply" | jget 'j.suggestion')" = "" ] || fail "no draft should exist before one is requested"
+  suggested=$(curl -fsS -X POST -b "$JAR_G" -H 'content-type: application/json' -H "origin: $BASE_URL" -d '{}' "$BASE_URL/api/tickets/$TID/suggest-reply") || fail "agent suggest-reply failed"
+  draft_text=$(echo "$suggested" | jget 'j.suggestion.reply')
+  [ -n "$draft_text" ] || fail "suggest-reply returned no draft: $suggested"
+  [ "$(echo "$suggested" | jget 'j.suggestion.aiGenerated')" = "true" ] || fail "the draft must be marked as AI-generated: $suggested"
+  echo "$suggested" | grep -q "$NOTE" && fail "the draft contains the internal note"
+  [ "$(curl -fsS -b "$JAR_G" "$BASE_URL/api/tickets/$TID/suggest-reply" | jget 'j.suggestion.reply')" = "$draft_text" ] || fail "the latest draft should be readable by the agent"
+  [ "$(curl -fsS -b "$JAR_G" "$BASE_URL/api/tickets/$TID" | jget 'j.messages.length')" = "$msgs_before" ] || fail "a suggested reply must not be sent"
+  a_view=$(curl -fsS -b "$JAR_A" "$BASE_URL/api/tickets/$TID")
+  echo "$a_view" | grep -qF "$draft_text" && fail "customer A can see the AI draft"
+  echo "$a_view" | grep -Eqi 'triage|sentiment|needsHuman|suggestion' && fail "customer A's ticket carries AI fields: $a_view"
+  curl -fsS -b "$JAR_A" "$BASE_URL/api/tickets" | grep -Eqi 'triage|sentiment|suggestion' && fail "customer A's list carries AI fields"
+  pass "triage at creation (set by AI, not urgent); re-triage and suggested reply work; the draft is not sent and customers never see it"
 
   agent_view=$(curl -fsS -b "$JAR_G" "$BASE_URL/api/tickets/$TID")
   [ -n "$(echo "$agent_view" | jget 'j.ticket.firstRespondedAt')" ] || fail "first response was not stamped: $agent_view"

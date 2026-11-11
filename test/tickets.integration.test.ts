@@ -364,18 +364,18 @@ describe.skipIf(!url)("tickets: access rules (Postgres)", () => {
         expect((await json(await TID.PATCH(req("/x", "PATCH", { action: "resolve" }, origin), ctx(adaTicket)))).status).toBe(403);
         expect((await json(await MSG.POST(req("/x", "POST", { body: "b" }, origin), ctx(adaTicket)))).status).toBe(403);
         expect((await json(await READ.POST(req("/x", "POST", { all: true }, origin)))).status).toBe(403);
-        expect((await json(await TRIAGE.POST(req("/x", "POST", {}, origin)))).status).toBe(403);
+        expect((await json(await TRIAGE.POST(req("/x", "POST", {}, origin), ctx(adaTicket)))).status).toBe(403);
       }
       expect((await row(adaTicket)).status).toBe("new");
     });
 
-    it("the triage route is agent-only: 403 for customers and admins (even for the owner), 501 until issue 11.3 for agents", async () => {
+    it("the triage route is agent-only: 403 for customers and admins (even for the owner); the AI behaviour is in ai-support.integration.test.ts", async () => {
       for (const who of [ada, bob, root]) {
         as(who);
-        expect((await json(await TRIAGE.POST(req(`/api/tickets/${adaTicket}/triage`, "POST", {})))).status).toBe(403);
+        expect((await json(await TRIAGE.POST(req(`/api/tickets/${adaTicket}/triage`, "POST", {}), ctx(adaTicket)))).status).toBe(403);
       }
       as(gina);
-      expect((await json(await TRIAGE.POST(req(`/api/tickets/${adaTicket}/triage`, "POST", {})))).status).toBe(501);
+      expect((await json(await TRIAGE.POST(req(`/api/tickets/${adaTicket}/triage`, "POST", {}), ctx(adaTicket)))).status).toBe(200);
     });
   });
 

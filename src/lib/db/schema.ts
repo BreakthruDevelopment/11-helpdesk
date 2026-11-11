@@ -225,6 +225,35 @@ export const kbArticle = pgTable(
   ],
 );
 
+export const SUGGESTION_MODES = ["demo", "live"] as const;
+
+/**
+ * AI reply drafts (src/lib/support-ai.ts). Agents only: a customer never reads this table, and nothing here is sent
+ * anywhere; the draft only fills an agent's reply box. `data` holds the guardrail-checked draft, `article_ids` the
+ * published articles it cites (re-checked against `published` when read). The newest row per ticket is the one shown.
+ */
+export const replySuggestion = pgTable(
+  "reply_suggestion",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    ticketId: uuid("ticket_id")
+      .notNull()
+      .references(() => ticket.id, { onDelete: "cascade" }),
+    /** The newest public message when the draft was made; a newer one makes the draft stale. */
+    basedOnMessageId: uuid("based_on_message_id").references(() => ticketMessage.id, { onDelete: "set null" }),
+    data: jsonb("data").notNull().$type<Record<string, unknown>>(),
+    articleIds: uuid("article_ids").array().notNull().default(sql`'{}'::uuid[]`),
+    mode: text("mode", { enum: SUGGESTION_MODES }).notNull(),
+    createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
+    createdAt: tstz("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("reply_suggestion_ticket_idx").on(t.ticketId, t.createdAt),
+    check("reply_suggestion_mode_chk", sql`${t.mode} in (${enumList(SUGGESTION_MODES)})`),
+    check("reply_suggestion_articles_chk", sql`cardinality(${t.articleIds}) <= 3`),
+  ],
+);
+
 // ---------------------------------------------------------------------------
 // Usage limits (src/lib/usage.ts). Each app lists its own kinds here; changing a list
 // needs a migration, because the CHECK constraints below are part of the schema.

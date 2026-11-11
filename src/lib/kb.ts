@@ -1,5 +1,5 @@
 import "server-only";
-import { type SQL, and, count, desc, eq, sql } from "drizzle-orm";
+import { type SQL, and, count, desc, eq, inArray, sql } from "drizzle-orm";
 import { cache } from "react";
 import { z } from "zod";
 import { assertAgent } from "@/lib/access";
@@ -180,6 +180,43 @@ export const getPublished = cache(async (slug: string): Promise<PublicArticle> =
   if (!row) throw new NotFoundError();
   return row;
 });
+
+// ---------------------------------------------------------------------------
+// AI grounding (issue 11.3)
+// ---------------------------------------------------------------------------
+
+/** A published article as the AI features see it. Never a draft, never an author. */
+export type GroundingArticle = { id: string; slug: string; title: string; body: string };
+
+/**
+ * The best published matches for free text (a subject plus a customer's message), same ranking as `searchPublished`.
+ * Takes no actor, like the public search: it can only ever return published rows. The caller has already decided
+ * the text may be searched (the text is cut to the query limit here).
+ */
+export async function retrieveForAi(text: string, limit: number): Promise<GroundingArticle[]> {
+  const q = text.replace(/\0/g, "").replace(/\s+/g, " ").trim().slice(0, KB_LIMITS.queryMax).trim();
+  if (!q || limit < 1) return [];
+  const published = eq(kbArticle.status, "published");
+  const parts = await searchParts(q, published);
+  return db()
+    .select({ id: kbArticle.id, slug: kbArticle.slug, title: kbArticle.title, body: kbArticle.body })
+    .from(kbArticle)
+    .where(and(published, parts.match))
+    .orderBy(...parts.order)
+    .limit(Math.min(limit, 10));
+}
+
+/** Of these ids, the ones that are published articles right now (a model's, or a stored, suggestion is re-checked here). */
+export async function publishedByIds(ids: readonly string[]): Promise<GroundingArticle[]> {
+  const valid = ids.filter((id) => z.string().uuid().safeParse(id).success);
+  if (valid.length === 0) return [];
+  const rows = await db()
+    .select({ id: kbArticle.id, slug: kbArticle.slug, title: kbArticle.title, body: kbArticle.body })
+    .from(kbArticle)
+    .where(and(eq(kbArticle.status, "published"), inArray(kbArticle.id, valid)));
+  // Keep the caller's order.
+  return valid.map((id) => rows.find((r) => r.id === id)).filter((r): r is GroundingArticle => r !== undefined);
+}
 
 // ---------------------------------------------------------------------------
 // Agent reads

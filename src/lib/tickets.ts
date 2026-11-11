@@ -10,8 +10,8 @@ import { BadRequestError, ConflictError, NotFoundError } from "@/lib/errors";
 import { log } from "@/lib/log";
 import { mailer } from "@/lib/mail/outbox";
 import { publicSnippet, subjectFor } from "@/lib/mail";
-import { firstResponseDueAt, pausedFor, resolutionDueAt } from "@/lib/sla";
-import { stampBreaches } from "@/lib/sla-db";
+import { type TicketSla, dueTimes, firstResponseDueAt, resolutionDueAt, resumeClock as resumeSlaClock, slaView } from "@/lib/sla";
+import { queueOrder, stampBreaches } from "@/lib/sla-db";
 import { type Tx, advisoryLock, consumeRate } from "@/lib/usage";
 
 /**
@@ -115,7 +115,12 @@ export type CustomerMessage = {
   createdAt: Date;
 };
 
-export type AgentTicket = typeof ticket.$inferSelect & { customerName: string | null };
+/** An agent sees every column plus the SLA state, computed from the row on every read (src/lib/sla.ts). */
+export type AgentTicket = typeof ticket.$inferSelect & { customerName: string | null; sla: TicketSla };
+
+function toAgentTicket(row: typeof ticket.$inferSelect, customerName: string | null, now: Date): AgentTicket {
+  return { ...row, customerName, sla: slaView(row, now) };
+}
 
 export type AgentMessage = typeof ticketMessage.$inferSelect & { authorName: string | null };
 
@@ -196,18 +201,11 @@ async function assertUnderOpenCap(tx: Tx, customerId: string): Promise<void> {
 
 type Changes = Partial<typeof ticket.$inferInsert>;
 
-/** Leaving `pending_customer`: the waiting time moves the resolution deadline later and the clock runs again. */
+/** Leaving `pending_customer`: see `resumeSlaClock`. Returns the column changes and the new paused total. */
 function resumeClock(row: typeof ticket.$inferSelect, now: Date): { changes: Changes; pausedSeconds: number } {
   if (!row.pausedAt) return { changes: {}, pausedSeconds: row.pausedSeconds };
-  const elapsed = pausedFor(row.pausedAt, now);
-  return {
-    pausedSeconds: row.pausedSeconds + elapsed,
-    changes: {
-      pausedAt: null,
-      pausedSeconds: row.pausedSeconds + elapsed,
-      resolutionDueAt: new Date(row.resolutionDueAt.getTime() + elapsed * 1000),
-    },
-  };
+  const resumed = resumeSlaClock(row, now);
+  return { pausedSeconds: resumed.pausedSeconds, changes: resumed };
 }
 
 // ---------------------------------------------------------------------------
@@ -304,12 +302,12 @@ export async function listTickets(actor: Actor, query: unknown = {}): Promise<({
     .from(ticket)
     .leftJoin(user, eq(user.id, ticket.customerId))
     .where(and(ticketScope(access), view, q.status ? eq(ticket.status, q.status) : undefined))
-    // Open work first, the soonest resolution deadline at the top; the id keeps pages stable. Issue 11.2 refines the queue.
-    .orderBy(asc(sql`(${ticket.status} = 'resolved')`), asc(ticket.resolutionDueAt), asc(ticket.id))
+    // Whatever is ticking, soonest deadline first; then paused work; resolved last. The id keeps pages stable.
+    .orderBy(...queueOrder(), asc(ticket.id))
     .limit(q.limit + 1)
     .offset(q.offset);
   const p = page(rows);
-  return { tickets: p.rows.map((r) => ({ ...r.ticket, customerName: r.customerName })), hasMore: p.hasMore, nextOffset: p.nextOffset };
+  return { tickets: p.rows.map((r) => toAgentTicket(r.ticket, r.customerName, now)), hasMore: p.hasMore, nextOffset: p.nextOffset };
 }
 
 /** Unresolved tickets the actor can see (a customer's own, or the whole queue for an agent), by count query. */
@@ -357,7 +355,7 @@ export async function getTicket(
     .where(and(eq(ticketMessage.ticketId, tid), messageScope(access)))
     .orderBy(desc(ticketMessage.createdAt), desc(ticketMessage.id))
     .limit(THREAD_WINDOW);
-  return { ticket: { ...found.ticket, customerName: found.customerName }, messages: messages.reverse().map((m) => ({ ...m.message, authorName: m.authorName })) };
+  return { ticket: toAgentTicket(found.ticket, found.customerName, new Date()), messages: messages.reverse().map((m) => ({ ...m.message, authorName: m.authorName })) };
 }
 
 // ---------------------------------------------------------------------------
@@ -549,15 +547,14 @@ async function updateAsAgent(actor: Actor, access: ContentAccess, tid: string, i
     if (v.priority !== undefined && v.priority !== row.priority) {
       changes.priority = v.priority;
       changes.triageSource = "agent";
-      changes.firstResponseDueAt = firstResponseDueAt(v.priority, row.createdAt);
-      changes.resolutionDueAt = resolutionDueAt(v.priority, row.createdAt, pausedSeconds);
+      Object.assign(changes, dueTimes(v.priority, row.createdAt, pausedSeconds));
     }
     if (v.category !== undefined && v.category !== row.category) {
       changes.category = v.category;
       changes.triageSource = "agent";
     }
 
-    if (Object.keys(changes).length === 0) return { ...row, customerName: null as string | null };
+    if (Object.keys(changes).length === 0) return row;
 
     // A change that stops a clock (this PATCH resolves or pauses) is judged against the
     // deadlines it sets, now: stampBreaches() ran on the old ones, and it skips resolved and paused tickets, so a
@@ -598,10 +595,10 @@ async function updateAsAgent(actor: Actor, access: ContentAccess, tid: string, i
         snippet: "Your ticket was marked resolved. Reply within 7 days if the problem comes back.",
       });
     }
-    return { ...saved, customerName: null as string | null };
+    return saved;
   });
 
   const [name] = await db().select({ name: user.name }).from(user).where(eq(user.id, updated.customerId));
   log.info("ticket.updated", { ticketId: tid, by: actor.id, version: updated.version });
-  return { ...updated, customerName: name?.name ?? null };
+  return toAgentTicket(updated, name?.name ?? null, new Date());
 }

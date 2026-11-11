@@ -25,3 +25,19 @@ export async function stampBreaches(tx: Pick<Executor, "execute">): Promise<void
     where breached_resolution_at is null and resolved_at is null and paused_at is null and resolution_due_at < now()
   `);
 }
+
+/**
+ * The agent queue's ORDER BY, the SQL twin of `nextDueAt()` in sla.ts: tickets with a clock running come first, the
+ * soonest deadline at the top (an unanswered ticket by its first-response deadline, an answered one by its resolution
+ * deadline); then tickets waiting on the customer with nothing ticking; resolved tickets last. Spread it into
+ * `.orderBy(...queueOrder(), asc(ticket.id))` so pages stay stable.
+ */
+export function queueOrder() {
+  return [
+    sql`(case
+      when status = 'resolved' then 2
+      when first_responded_at is not null and paused_at is not null then 1
+      else 0 end) asc`,
+    sql`(case when first_responded_at is null then first_response_due_at else resolution_due_at end) asc`,
+  ] as const;
+}

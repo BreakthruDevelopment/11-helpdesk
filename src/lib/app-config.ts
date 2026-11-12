@@ -11,11 +11,13 @@ export const PARENT_SITE = { href: "https://breakthruventures.ai", label: "Explo
 
 /**
  * Header navigation. Visibility flags only hide a link; every page still enforces its role.
- * `customerOnly` is the portal. The agent desk link arrives with issue 11.5.
+ * `customerOnly` is the portal; `agentOnly` is the desk and the KB editor.
  */
-export const NAV_LINKS: { href: string; label: string; adminOnly?: boolean; customerOnly?: boolean; signedIn?: boolean }[] = [
+export const NAV_LINKS: { href: string; label: string; adminOnly?: boolean; agentOnly?: boolean; customerOnly?: boolean; signedIn?: boolean }[] = [
   { href: "/kb", label: "Help" },
   { href: "/support", label: "Support", customerOnly: true },
+  { href: "/desk", label: "Desk", agentOnly: true },
+  { href: "/desk/kb", label: "KB editor", agentOnly: true },
   { href: "/inbox", label: "Inbox", signedIn: true },
   { href: "/admin", label: "Admin", adminOnly: true },
 ];

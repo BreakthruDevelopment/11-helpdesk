@@ -6,10 +6,14 @@ import { usePathname } from "next/navigation";
 export function NavLinks({ links }: { links: { href: string; label: string; badge?: number }[] }) {
   const pathname = usePathname();
   if (links.length === 0) return null;
+  // The longest matching link is the current one, so /desk/kb marks "KB editor" and not "Desk" too.
+  const current = links
+    .filter((l) => pathname === l.href || pathname.startsWith(`${l.href}/`))
+    .reduce<string | null>((best, l) => (best === null || l.href.length > best.length ? l.href : best), null);
   return (
     <nav aria-label="Main" className="flex flex-wrap items-center gap-x-5">
       {links.map((l) => {
-        const active = pathname === l.href || pathname.startsWith(`${l.href}/`);
+        const active = l.href === current;
         const unread = l.badge !== undefined && l.badge > 0 ? l.badge : 0;
         return (
           <Link

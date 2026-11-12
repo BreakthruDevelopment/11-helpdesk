@@ -18,7 +18,7 @@ export function Countdown({ due, overdueClass = "text-danger" }: { due: string |
   const overdue = text.endsWith("overdue");
   return (
     <time dateTime={due ?? undefined} suppressHydrationWarning className={overdue ? `font-semibold ${overdueClass}` : "text-foreground"}>
-      {overdue ? text : `Due ${text}`}
+      {overdue ? text : text === "due now" ? "Due now" : `Due ${text}`}
     </time>
   );
 }

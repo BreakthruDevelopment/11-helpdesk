@@ -59,12 +59,13 @@ export function Composer({ send, suggest, latest, bodyMax, reopens }: Props) {
   return (
     <section
       aria-labelledby="composer-title"
-      className="rounded-card border border-border bg-surface p-4 shadow-sm max-lg:max-h-[55dvh] max-lg:overflow-y-auto sm:p-6"
+      className="rounded-card border border-border bg-surface p-4 shadow-sm max-lg:max-h-[60dvh] max-lg:overflow-y-auto sm:p-6"
     >
       <h2 id="composer-title" className="mb-3 font-display text-xl font-semibold max-sm:sr-only">
         {mode === "internal" ? "Internal note" : "Reply to customer"}
       </h2>
-      <form action={formAction} className="space-y-3">
+      {/* Below 1024px the composer is a pinned strip: the text box and Send come first, the draft details (sources, Discard) after them. */}
+      <form action={formAction} className="space-y-3 max-lg:flex max-lg:flex-col max-lg:gap-3 max-lg:space-y-0">
         <fieldset className="flex flex-wrap gap-2">
           <legend className="sr-only">Message type</legend>
           {(
@@ -110,7 +111,7 @@ export function Composer({ send, suggest, latest, bodyMax, reopens }: Props) {
             value={body}
             onChange={(e) => setBody(e.target.value)}
             disabled={busy}
-            className={`${textareaClass} ${mode === "internal" ? "border-dashed border-building bg-building-soft" : ""}`}
+            className={`${textareaClass} max-lg:h-36 max-lg:min-h-28 ${mode === "internal" ? "border-dashed border-building bg-building-soft" : ""}`}
           />
         </label>
         <input type="hidden" name="aiAssisted" value={aiAssisted ? "true" : "false"} />
@@ -142,7 +143,7 @@ export function Composer({ send, suggest, latest, bodyMax, reopens }: Props) {
 
 function DraftInfo({ draft, internal, onDiscard, disabled }: { draft: ReplySuggestionView; internal: boolean; onDiscard: () => void; disabled: boolean }) {
   return (
-    <div className="space-y-2 rounded-card border border-accent bg-accent-soft p-3 text-sm" role="note" aria-label="AI draft details">
+    <div className="space-y-2 rounded-card border border-accent bg-accent-soft p-3 text-sm max-lg:order-last" role="note" aria-label="AI draft details">
       <p className="flex flex-wrap items-center gap-2">
         <span className="font-semibold text-accent">AI draft</span>
         <span className="text-muted">Not sent. Read it, edit it, then press Send.</span>

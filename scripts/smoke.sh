@@ -51,11 +51,25 @@ for path in /dashboard /admin /support /support/new /inbox /desk /desk/kb /desk/
 done
 pass "signed-out dashboard, admin, portal, inbox, desk and KB editor redirect"
 
+# Better Auth allows 3 sign-in/sign-up requests per 10 s per IP. On a 429, wait out the window and retry once.
+auth_post() {
+  local jar=$1 path=$2 payload=$3 code
+  for attempt in 1 2; do
+    code=$(curl -s -o /dev/null -w '%{http_code}' -c "$jar" -b "$jar" -H 'content-type: application/json' -H "origin: $BASE_URL" \
+      -d "$payload" "$BASE_URL$path")
+    if [ "$code" = "429" ] && [ "$attempt" = "1" ]; then
+      echo "auth rate limit (429) on $path; waiting 11s and retrying once"
+      sleep 11
+      continue
+    fi
+    break
+  done
+  case "$code" in 2??) return 0 ;; *) echo "auth request to $path returned $code" >&2; return 1 ;; esac
+}
+
 signup() {
   local jar=$1 email=$2
-  curl -fsS -c "$jar" -b "$jar" -H 'content-type: application/json' -H "origin: $BASE_URL" \
-    -d "{\"email\":\"$email\",\"password\":\"smoke-test-password-1\",\"name\":\"Smoke\"}" \
-    "$BASE_URL/api/auth/sign-up/email" >/dev/null || fail "sign-up failed for $email"
+  auth_post "$jar" /api/auth/sign-up/email "{\"email\":\"$email\",\"password\":\"smoke-test-password-1\",\"name\":\"Smoke\"}" || fail "sign-up failed for $email"
 }
 
 signup "$JAR_A" "smoke-a-$RUN_ID@example.test"
@@ -191,9 +205,7 @@ echo "$kb_page" | grep -q 'Open a ticket' || fail "article page missing the open
 pass "public /kb lists and searches published articles and /kb/[slug] shows one (unknown is 404)"
 
 if [ -n "${SMOKE_AGENT_EMAIL:-}" ] && [ -n "${SMOKE_AGENT_PASSWORD:-}" ]; then
-  curl -fsS -c "$JAR_G" -b "$JAR_G" -H 'content-type: application/json' -H "origin: $BASE_URL" \
-    -d "{\"email\":\"$SMOKE_AGENT_EMAIL\",\"password\":\"$SMOKE_AGENT_PASSWORD\"}" \
-    "$BASE_URL/api/auth/sign-in/email" >/dev/null || fail "agent sign-in failed"
+  auth_post "$JAR_G" /api/auth/sign-in/email "{\"email\":\"$SMOKE_AGENT_EMAIL\",\"password\":\"$SMOKE_AGENT_PASSWORD\"}" || fail "agent sign-in failed"
 
   agent_view=$(curl -fsS -b "$JAR_G" "$BASE_URL/api/tickets/$TID") || fail "agent could not read the ticket"
   [ -n "$(echo "$agent_view" | jget 'j.ticket.firstResponseDueAt')" ] || fail "first response due time not set: $agent_view"
@@ -335,9 +347,7 @@ fi
 # never a ticket subject. The demo button itself is not pressed here (it is rate limited per day).
 if [ -n "${SMOKE_ADMIN_EMAIL:-}" ] && [ -n "${SMOKE_ADMIN_PASSWORD:-}" ]; then
   JAR_M="$(mktemp)"
-  curl -fsS -c "$JAR_M" -b "$JAR_M" -H 'content-type: application/json' -H "origin: $BASE_URL" \
-    -d "{\"email\":\"$SMOKE_ADMIN_EMAIL\",\"password\":\"$SMOKE_ADMIN_PASSWORD\"}" \
-    "$BASE_URL/api/auth/sign-in/email" >/dev/null || fail "admin sign-in failed"
+  auth_post "$JAR_M" /api/auth/sign-in/email "{\"email\":\"$SMOKE_ADMIN_EMAIL\",\"password\":\"$SMOKE_ADMIN_PASSWORD\"}" || fail "admin sign-in failed"
   admin_page=$(curl -fsS -b "$JAR_M" "$BASE_URL/admin") || fail "admin page did not render"
   for want in 'Helpdesk overview' 'Resolution breaches' 'AI calls today' 'Load demo workspace' 'Make agent'; do
     echo "$admin_page" | grep -q "$want" || fail "admin page missing: $want"

@@ -67,8 +67,8 @@ export default async function DeskTicketPage({ params }: PageProps<"/desk/[id]">
         }
       />
 
-      <div className="flex flex-col gap-6 lg:grid lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)] lg:grid-rows-[auto_1fr] lg:items-start">
-        <div className="min-w-0 space-y-6 lg:col-start-1">
+      <div className="contents lg:grid lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)] lg:grid-rows-[auto_1fr] lg:items-start">
+        <div className="min-w-0 space-y-6 max-lg:mb-6 lg:col-start-1">
           <Panel title="Conversation" count={messages.length}>
             {messages.length === 0 ? (
               <p className="text-muted">No messages on this ticket yet.</p>
@@ -82,7 +82,7 @@ export default async function DeskTicketPage({ params }: PageProps<"/desk/[id]">
           </Panel>
         </div>
 
-        <aside aria-label="Ticket details" className="min-w-0 space-y-6 lg:col-start-2 lg:row-span-2 lg:row-start-1">
+        <aside aria-label="Ticket details" className="min-w-0 space-y-6 max-lg:mb-6 lg:col-start-2 lg:row-span-2 lg:row-start-1">
           <Panel title="Properties">
             <div className="space-y-4">
               <PropertyForm action={update} field="status" label="Status" version={ticket.version} value={ticket.status} options={statusOptions} />
@@ -202,7 +202,7 @@ export default async function DeskTicketPage({ params }: PageProps<"/desk/[id]">
           </Panel>
         </aside>
 
-        {/* Pinned to the bottom of the screen below 1024px; in the left column under the thread on desktop. */}
+        {/* Pinned to the bottom of the screen below 1024px (the grid above is display: contents there, so the page is the sticky range); in the left column under the thread on desktop. */}
         <div className="min-w-0 max-lg:sticky max-lg:bottom-0 max-lg:z-10 lg:col-start-1">
           <Composer
             send={sendMessage.bind(null, ticket.id)}

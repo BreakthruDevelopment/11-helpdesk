@@ -125,6 +125,7 @@ Authorization still lives in `src/lib/auth/rbac.ts` and your data functions.
 | `src/lib/jobs/*` + `job` table | Work must outlive the request (fetch a page, call a model, send mail): see [Background jobs](#background-jobs). |
 | `src/lib/db/migrate-on-start.ts` | Already wired by `instrumentation.ts`. Background work that needs the schema awaits `whenMigrated()` first. |
 | `src/lib/demo-identity.ts`, `src/lib/demo-seed-config.ts` | The app has a demo workspace: `demoSeedConfig()` runs first in `scripts/seed-demo.mts` and refuses production hosts and databases; `isDemoEmail` and `MARKER` stop public sign-ups faking a demo user. Set `MARKER` per app. |
+| `src/lib/ip-limit.ts` | A public route with no sign-in: `allowPublicRequest(clientIp(request))` (60 per minute per IP; the last `X-Forwarded-For` entry is the proxy's). Used by `GET /api/kb` (429 with `Retry-After`) and the `/kb` pages (a "Too many requests" state). In memory, so per instance. |
 
 ## Encrypting stored secrets
 

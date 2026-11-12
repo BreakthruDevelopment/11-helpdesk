@@ -3,9 +3,11 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { KbBody } from "@/components/kb-body";
 import { formatWhen } from "@/components/format-when";
+import { RateLimited } from "@/components/rate-limited";
 import { PageIntro, Panel, buttonPrimary, buttonSecondary } from "@/components/ui";
 import { NotFoundError } from "@/lib/errors";
 import { getPublished } from "@/lib/kb";
+import { kbAllowed } from "../limit";
 
 export const dynamic = "force-dynamic";
 
@@ -20,6 +22,7 @@ async function load(slug: string) {
 
 export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }): Promise<Metadata> {
   const { slug } = await params;
+  if (!(await kbAllowed())) return { title: "Help article" };
   try {
     return { title: (await getPublished(slug)).title };
   } catch {
@@ -29,6 +32,7 @@ export async function generateMetadata({ params }: { params: Promise<{ slug: str
 
 export default async function KbArticlePage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
+  if (!(await kbAllowed())) return <RateLimited />;
   const article = await load(slug);
   return (
     <>

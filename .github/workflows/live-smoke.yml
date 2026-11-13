@@ -1,0 +1,26 @@
+name: Live smoke test
+on:
+  push:
+    branches: ["claude/live-smoke*"]
+permissions:
+  contents: read
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Image pulls anonymously (both architectures)
+        run: |
+          tok=$(curl -fsS "https://ghcr.io/token?scope=repository:breakthrudevelopment/11-helpdesk:pull" | jq -r .token)
+          curl -fsS -H "Authorization: Bearer $tok" -H 'Accept: application/vnd.oci.image.index.v1+json' "https://ghcr.io/v2/breakthrudevelopment/11-helpdesk/manifests/sha-3fd1ca2" | jq -r '.manifests[]?.platform | "\(.os)/\(.architecture)"'
+      - name: Health
+        if: ${{ hashFiles('.github/live-smoke-url') != '' }}
+        run: |
+          url="$(head -n1 .github/live-smoke-url | tr -d '[:space:]')"; echo "url=$url" >> "$GITHUB_ENV"
+          for i in $(seq 1 30); do curl -fsS -m 30 "$url/api/health" && exit 0; sleep 20; done; exit 1
+      - name: Smoke
+        if: ${{ hashFiles('.github/live-smoke-url') != '' }}
+        run: BASE_URL="$url" bash scripts/smoke.sh
